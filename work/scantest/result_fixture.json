@@ -1,0 +1,16 @@
+{
+ "url": "http://127.0.0.1:8765/index.html",
+ "final": "http://127.0.0.1:8765/index.html",
+ "old": [
+  "https://img.alicdn.com/imgextra/i3/O1CN01GXym4K1qcq5dHLTgQ_!!6000000005517-2-tps-268-268.png",
+  "https://img.alicdn.com/imgextra/i2/O1CN010VLpQY1VWKHBQuBUQ_!!6000000002660-2-tps-222-222.png",
+  "https://img.alicdn.com/imgextra/i1/3189900846/O1CN01Qmfakx1I7WBT7hXIV_!!3189900846.jpg_220x220.jpg"
+ ],
+ "new": [
+  "https://img.alicdn.com/imgextra/i4/3189900846/O1CN01OdPJWv1I7WBEIFR6m_!!3189900846.jpg",
+  "https://img.alicdn.com/imgextra/i3/2218033562317/O1CN013siPx41SzEm9iYgnt_!!2218033562317.jpg",
+  "https://img.alicdn.com/imgextra/i1/3189900846/O1CN01Qmfakx1I7WBT7hXIV_!!3189900846.jpg",
+  "https://img.alicdn.com/imgextra/i2/3189900846/O1CN01HRFqCP1I7WBR6kDcD_!!3189900846.jpg",
+  "https://img.alicdn.com/bao/uploaded/i4/i1/2214240553215/O1CN01uTj6LC1ZcWP4BB2CG_!!4611686018427382015-0-item_pic.jpg"
+ ]
+}

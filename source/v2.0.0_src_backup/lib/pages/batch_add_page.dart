@@ -1,0 +1,212 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+
+import '../data/db.dart';
+import '../data/models.dart';
+import '../data/taxonomy.dart';
+import '../services/cutout.dart';
+import '../services/images.dart';
+import '../services/settings.dart';
+import '../services/tagger.dart';
+import '../widgets/common.dart';
+import '../widgets/pickers.dart';
+
+class _Item {
+  final String src;
+  String state = 'wait'; // wait / run / ok / fail
+  Clothes? c;
+  _Item(this.src);
+}
+
+/// 批量添加：逐张抠图 + 识别 → 确认后一键保存
+class BatchAddPage extends StatefulWidget {
+  final List<String> paths;
+  final String status;
+  final String source;
+  const BatchAddPage({super.key, required this.paths, this.status = '拥有', this.source = 'batch'});
+  @override
+  State<BatchAddPage> createState() => _BatchAddPageState();
+}
+
+class _BatchAddPageState extends State<BatchAddPage> {
+  late final items = widget.paths.map(_Item.new).toList();
+  bool cutout = Settings.batchAutoCutout;
+  bool saving = false;
+  bool stopped = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _process();
+  }
+
+  @override
+  void dispose() {
+    stopped = true;
+    super.dispose();
+  }
+
+  Future<void> _process() async {
+    for (final it in items) {
+      if (stopped) return;
+      if (it.state != 'wait') continue;
+      setState(() => it.state = 'run');
+      try {
+        final original = await ImageStore.saveOriginal(it.src);
+        String image = original;
+        if (cutout) {
+          final png = await Cutout.I.run(File(ImageStore.abs(original)));
+          if (png != null) image = await ImageStore.savePng(png, 'img');
+        }
+        final thumb = await ImageStore.makeThumb(image);
+        final c = Clothes(image: image, originalImage: original, thumb: thumb, status: widget.status, source: widget.source);
+        if (Settings.autoRecognize) {
+          final r = await Tagger.analyze(File(ImageStore.abs(image)));
+          c
+            ..cat1 = r.cat1
+            ..cat2 = r.cat2
+            ..colors = r.colors
+            ..seasons = r.seasons
+            ..material = r.material
+            ..style = r.style
+            ..warmth = r.warmth
+            ..silhouette = r.silhouette
+            ..length = r.length
+            ..layer = r.layer;
+        }
+        it.c = c;
+        it.state = 'ok';
+      } catch (_) {
+        it.state = 'fail';
+      }
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _saveAll() async {
+    final ok = items.where((e) => e.state == 'ok').toList();
+    setState(() => saving = true);
+    for (final it in ok) {
+      await AppDb.I.saveClothes(it.c!);
+    }
+    final fail = items.length - ok.length;
+    if (!mounted) return;
+    toast(null, '成功添加 ${ok.length} 件${fail > 0 ? '，失败 $fail 张' : ''}', style: 'success');
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final done = items.where((e) => e.state == 'ok' || e.state == 'fail').length;
+    final ok = items.where((e) => e.state == 'ok').length;
+    final running = done < items.length;
+    return Scaffold(
+      appBar: appBar('批量添加（${items.length}张）'),
+      body: Column(children: [
+        if (running)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Column(children: [
+              LinearProgressIndicator(value: items.isEmpty ? 1 : done / items.length),
+              const SizedBox(height: 6),
+              Text('正在处理 $done/${items.length}${cutout ? '（抠图 + 识别）' : '（识别）'}', style: const TextStyle(color: kGrayText, fontSize: 12)),
+            ]),
+          )
+        else
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Text(
+              items.any((e) => e.state == 'fail') ? '部分图片准备失败，可删除失败图片后保存' : '识别仅供参考，点击卡片可修改品类和季节',
+              style: const TextStyle(color: kGrayText, fontSize: 12),
+            ),
+          ),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: 0.62),
+            itemCount: items.length,
+            itemBuilder: (_, i) => _tile(items[i]),
+          ),
+        ),
+      ]),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 10),
+          child: SizedBox(
+            height: 50,
+            child: FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kPurple, shape: const StadiumBorder()),
+              onPressed: running || saving || ok == 0 ? null : _saveAll,
+              child: Text(running ? '处理中…' : '全部保存（$ok件）', style: const TextStyle(fontSize: 16)),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tile(_Item it) {
+    final c = it.c;
+    return GestureDetector(
+      onTap: c == null
+          ? null
+          : () async {
+              final r = await pickSysCategory(context, c.cat1, c.cat2);
+              if (r != null) {
+                setState(() {
+                  c.cat1 = r.value?.first;
+                  c.cat2 = (r.value?.length ?? 0) > 1 ? r.value![1] : null;
+                });
+              }
+            },
+      child: Container(
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12), border: Border.all(color: it.state == 'fail' ? Colors.red.shade200 : const Color(0xFFE9E9EE))),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(children: [
+          Column(children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: c == null ? Image.file(File(it.src), fit: BoxFit.cover, cacheWidth: 300, width: double.infinity) : AppImage(c.listImage, width: double.infinity, placeholder: Colors.white),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(6, 0, 6, 4),
+              child: Text(
+                c == null ? (it.state == 'fail' ? '处理失败' : '等待处理') : (c.cat2 ?? c.cat1 ?? unrecognized),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: it.state == 'fail' ? Colors.red : Colors.black87),
+              ),
+            ),
+            if (c != null)
+              GestureDetector(
+                onTap: () async {
+                  final r = await pickSeasons(context, c.seasons);
+                  if (r != null) setState(() => c.seasons = r);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 0, 6, 6),
+                  child: Text(c.seasons.isEmpty ? '设置季节' : c.seasons.map((e) => seasonShort[e]).join(''), style: const TextStyle(fontSize: 11, color: kPurple)),
+                ),
+              ),
+          ]),
+          if (it.state == 'run') const Positioned.fill(child: ColoredBox(color: Color(0x88FFFFFF), child: Center(child: CircularProgressIndicator()))),
+          Positioned(
+            right: 2,
+            top: 2,
+            child: GestureDetector(
+              onTap: it.state == 'run'
+                  ? null
+                  : () async {
+                      if (await confirm(context, '移除图片', '确定删除这张图片吗？删除后将从本次批量添加任务中移除。')) setState(() => items.remove(it));
+                    },
+              child: const CircleAvatar(radius: 11, backgroundColor: Color(0x66000000), child: Icon(Icons.close, size: 14, color: Colors.white)),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
