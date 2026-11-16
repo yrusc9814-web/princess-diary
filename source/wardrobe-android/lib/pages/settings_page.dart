@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/settings.dart';
+import '../services/tryon.dart';
 import '../widgets/common.dart';
 import 'backup_page.dart';
 
@@ -54,29 +55,22 @@ class _SettingsPageState extends State<SettingsPage> {
           title: const Text('AI 试衣设置'),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('使用阿里云百炼「AI 试衣」接口，按张计费（新用户有免费额度）。需华北2（北京）地域的 API Key。', style: TextStyle(fontSize: 13, color: kGrayText, height: 1.5)),
+              const Text('使用阿里云百炼「千问图像编辑」模型生成试穿图，按张计费（标准版约 0.2 元/次）。需华北2（北京）地域的 API Key。', style: TextStyle(fontSize: 13, color: kGrayText, height: 1.5)),
               const SizedBox(height: 10),
               TextField(controller: ctl, decoration: const InputDecoration(labelText: 'DashScope API Key', hintText: 'sk-...')),
               const SizedBox(height: 12),
               const Text('模型', style: TextStyle(fontWeight: FontWeight.w600)),
-              RadioListTile<String>(
-                contentPadding: EdgeInsets.zero,
-                value: 'aitryon',
-                // ignore: deprecated_member_use
-                groupValue: model,
-                // ignore: deprecated_member_use
-                onChanged: (v) => set(() => model = v!),
-                title: const Text('aitryon（基础版，较快）'),
-              ),
-              RadioListTile<String>(
-                contentPadding: EdgeInsets.zero,
-                value: 'aitryon-plus',
-                // ignore: deprecated_member_use
-                groupValue: model,
-                // ignore: deprecated_member_use
-                onChanged: (v) => set(() => model = v!),
-                title: const Text('aitryon-plus（效果更好）'),
-              ),
+              for (final e in TryOn.models.entries)
+                RadioListTile<String>(
+                  contentPadding: EdgeInsets.zero,
+                  value: e.key,
+                  // ignore: deprecated_member_use
+                  groupValue: model,
+                  // ignore: deprecated_member_use
+                  onChanged: (v) => set(() => model = v!),
+                  title: Text(e.value),
+                  subtitle: Text(e.key, style: const TextStyle(fontSize: 11, color: kGrayText)),
+                ),
               TextButton(
                 onPressed: () => launchUrl(Uri.parse('https://bailian.console.aliyun.com/?apiKey=1'), mode: LaunchMode.externalApplication),
                 child: const Text('去百炼控制台获取 API Key'),

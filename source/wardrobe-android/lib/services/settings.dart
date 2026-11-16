@@ -42,12 +42,43 @@ class Settings {
   // AI 试衣（阿里云百炼）
   static String get dashscopeKey => p.getString('dashscope_key') ?? '';
   static set dashscopeKey(String v) => p.setString('dashscope_key', v.trim());
-  static String get tryOnModel => p.getString('tryon_model') ?? 'aitryon';
+  /// 旧值迁移：aitryon-plus（效果更好）→ qwen-image-3.0-pro；aitryon 及其他未知值 → qwen-image-3.0。
+  static String get tryOnModel {
+    final v = p.getString('tryon_model');
+    switch (v) {
+      case 'qwen-image-3.0':
+      case 'qwen-image-3.0-pro':
+        return v!;
+      case 'aitryon-plus':
+        return 'qwen-image-3.0-pro';
+      default:
+        return 'qwen-image-3.0';
+    }
+  }
   static set tryOnModel(String v) => p.setString('tryon_model', v);
 
   // 备份
   static int get lastExport => p.getInt('last_export') ?? 0;
   static set lastExport(int v) => p.setInt('last_export', v);
+
+  // 自动备份（每天凌晨 3 点）
+  static bool get autoBackupEnabled => p.getBool('auto_backup_enabled') ?? true;
+  static set autoBackupEnabled(bool v) => p.setBool('auto_backup_enabled', v);
+  /// 上次自动备份成功时的数据指纹（sha256）
+  static String get autoBackupHash => p.getString('auto_backup_hash') ?? '';
+  static set autoBackupHash(String v) => p.setString('auto_backup_hash', v);
+  /// 上次自动备份成功的时间（毫秒）
+  static int get autoBackupAt => p.getInt('auto_backup_at') ?? 0;
+  static set autoBackupAt(int v) => p.setInt('auto_backup_at', v);
+  /// 上次自动备份成功的文件名
+  static String get autoBackupFile => p.getString('auto_backup_file') ?? '';
+  static set autoBackupFile(String v) => p.setString('auto_backup_file', v);
+  /// 上次自动备份「检查」的时间（毫秒），无变化跳过时也会更新
+  static int get autoBackupLastCheck => p.getInt('auto_backup_last_check') ?? 0;
+  static set autoBackupLastCheck(int v) => p.setInt('auto_backup_last_check', v);
+  /// 上次自动备份失败原因（空串表示无）
+  static String get autoBackupError => p.getString('auto_backup_error') ?? '';
+  static set autoBackupError(String v) => p.setString('auto_backup_error', v);
 
   // 首页
   static String get recordedToday => p.getString('recorded_today') ?? '';

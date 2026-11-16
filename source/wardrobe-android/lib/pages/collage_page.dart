@@ -10,8 +10,20 @@ import '../data/db.dart';
 import '../data/models.dart';
 import '../services/images.dart';
 import '../widgets/common.dart';
+import 'image_edit_page.dart';
 import 'outfit_form_page.dart';
 import 'select_pages.dart';
+
+/// 把「旋转后局部坐标系」里的位移换算回屏幕坐标系的位移。
+///
+/// GestureDetector 在 Transform.rotate 内部，[ScaleUpdateDetails.focalPointDelta] 是
+/// 旋转之后局部坐标下的位移，直接加到 e.x/e.y 上会导致：旋转 180° 时上下左右全反，
+/// 旋转 90° 时左右变上下。这里按 [rot] 正向旋转回去，得到屏幕上真实的拖动方向。
+Offset rotateDelta(Offset d, double rot) {
+  final c = math.cos(rot);
+  final s = math.sin(rot);
+  return Offset(d.dx * c - d.dy * s, d.dx * s + d.dy * c);
+}
 
 class CollageResult {
   final String cover, canvas;
@@ -26,11 +38,24 @@ class _El {
   String text;
   int color;
   double x, y, scale, rot;
-  _El({required this.kind, this.image, this.clothesId, this.text = '', this.color = 0xFF000000, this.x = 0.5, this.y = 0.5, this.scale = 1, this.rot = 0});
-  Map<String, dynamic> toJson() => {'k': kind, 'i': image, 'c': clothesId, 't': text, 'col': color, 'x': x, 'y': y, 's': scale, 'r': rot};
+
+  /// 照片被裁剪前的完整原图（相对路径）。第一次裁剪时记下，之后每次裁剪都从它重新开始，
+  /// 这样反复裁剪不会越裁越小。旧数据没有这个字段时为 null，表示 image 就是原图。
+  String? original;
+  _El({required this.kind, this.image, this.clothesId, this.text = '', this.color = 0xFF000000, this.x = 0.5, this.y = 0.5, this.scale = 1, this.rot = 0, this.original});
+  Map<String, dynamic> toJson() => {'k': kind, 'i': image, 'c': clothesId, 't': text, 'col': color, 'x': x, 'y': y, 's': scale, 'r': rot, 'o': original};
   factory _El.fromJson(Map<String, dynamic> j) => _El(
       kind: j['k'], image: j['i'], clothesId: j['c'], text: j['t'] ?? '', color: j['col'] ?? 0xFF000000,
-      x: (j['x'] as num).toDouble(), y: (j['y'] as num).toDouble(), scale: (j['s'] as num).toDouble(), rot: (j['r'] as num).toDouble());
+      x: (j['x'] as num).toDouble(), y: (j['y'] as num).toDouble(), scale: (j['s'] as num).toDouble(), rot: (j['r'] as num).toDouble(),
+      original: j['o'] as String?);
+}
+
+/// 仅供测试：把画布 JSON 解析后再序列化，用来验证 _El 的字段（包括 'o'）往返不丢。
+@visibleForTesting
+String collageJsonRoundTrip(String canvasJson) {
+  final m = jsonDecode(canvasJson) as Map<String, dynamic>;
+  final list = (m['els'] as List).map((e) => _El.fromJson(Map<String, dynamic>.from(e as Map)));
+  return jsonEncode({'els': list.map((e) => e.toJson()).toList(), 'bg': m['bg'], 'bgImage': m['bgImage']});
 }
 
 /// 内置背景：纯色与渐变
@@ -62,6 +87,14 @@ class _CollagePageState extends State<CollagePage> {
   bool saving = false;
   // 手势
   double _startScale = 1, _startRot = 0;
+
+  /// 当前选中的照片元素（没选中或选中的是单品/文字时为 null）。
+  _El? get _selectedPhoto {
+    final i = sel;
+    if (i == null || i < 0 || i >= els.length) return null;
+    final e = els[i];
+    return e.kind == 'photo' ? e : null;
+  }
 
   @override
   void initState() {
@@ -121,6 +154,24 @@ class _CollagePageState extends State<CollagePage> {
     setState(() {
       els.add(_El(kind: 'photo', image: rel));
       sel = els.length - 1;
+      _snap();
+    });
+  }
+
+  /// 只给照片元素用：点「裁剪」才进裁剪页，选完照片不会自动进来。
+  ///
+  /// 每次都从 original（第一次裁剪前记下的完整原图）打开，所以反复裁剪不会越裁越小。
+  /// 确认后只替换 image，位置/缩放/旋转保持不变，再压入撤销栈；取消则什么都不改。
+  Future<void> _cropPhoto() async {
+    final e = _selectedPhoto;
+    if (e == null) return;
+    final src = e.original ?? e.image;
+    if (src == null || src.isEmpty) return;
+    final r = await push<EditedImage>(context, ImageEditPage(path: ImageStore.abs(src), cropOnly: true));
+    if (!mounted || r == null) return;
+    setState(() {
+      e.original ??= e.image;
+      e.image = r.image;
       _snap();
     });
   }
@@ -382,6 +433,8 @@ class _CollagePageState extends State<CollagePage> {
               _tool(Icons.photo_outlined, '照片', _addPhoto),
               _tool(Icons.text_fields, '文字', () => _editText()),
               _tool(Icons.wallpaper, '背景', _background),
+              // 只有选中照片时才出现「裁剪」，单品/文字/未选中都没有。
+              if (_selectedPhoto != null) _tool(Icons.crop, '裁剪', _cropPhoto),
               _tool(Icons.more_horiz, '更多', _more),
             ]),
           ),
@@ -431,8 +484,10 @@ class _CollagePageState extends State<CollagePage> {
             },
             onScaleUpdate: (d) {
               setState(() {
-                e.x = (e.x + d.focalPointDelta.dx / size.width).clamp(0.0, 1.0);
-                e.y = (e.y + d.focalPointDelta.dy / size.height).clamp(0.0, 1.0);
+                // 先用本次更新前的 e.rot 把局部位移换回屏幕坐标（双指旋转会在同一次回调里改 e.rot）。
+                final delta = rotateDelta(d.focalPointDelta, e.rot);
+                e.x = (e.x + delta.dx / size.width).clamp(0.0, 1.0);
+                e.y = (e.y + delta.dy / size.height).clamp(0.0, 1.0);
                 if (d.pointerCount > 1) {
                   e.scale = (_startScale * d.scale).clamp(0.2, 5.0);
                   e.rot = _startRot + d.rotation;

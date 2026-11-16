@@ -8,6 +8,7 @@ import 'package:image/image.dart' as img;
 
 import '../services/cutout.dart';
 import '../services/images.dart';
+import '../utils/crop_math.dart';
 import '../widgets/common.dart';
 import 'clothes_form_page.dart';
 
@@ -20,8 +21,12 @@ class EditedImage {
 class ImageEditPage extends StatefulWidget {
   final String path; // 源图（绝对路径）
   final bool newClothes; // true: 下一步进入添加单品；false: 返回 EditedImage
+
+  /// true: 只做裁剪（拼图里的照片重新裁剪用）。进来直接是裁剪模式，
+  /// 确认裁剪后不留下编辑页，直接 pop 返回 [EditedImage]。
+  final bool cropOnly;
   final bool autoCutout;
-  const ImageEditPage({super.key, required this.path, this.newClothes = false, this.autoCutout = false});
+  const ImageEditPage({super.key, required this.path, this.newClothes = false, this.cropOnly = false, this.autoCutout = false});
   @override
   State<ImageEditPage> createState() => _ImageEditPageState();
 }
@@ -38,10 +43,17 @@ class _ImageEditPageState extends State<ImageEditPage> {
   double brush = 28;
   // 裁剪（0~1 归一化）
   Rect crop = const Rect.fromLTRB(0.05, 0.05, 0.95, 0.95);
+  // 双指缩放基准：每次手势开始（或从单指变双指）时记录
+  Rect? _cropBase;
+  Offset _cropFocalStart = Offset.zero;
+  double _cropScaleRef = 1;
+  int _cropPointers = 0;
 
   @override
   void initState() {
     super.initState();
+    // cropOnly：进来就直接是裁剪模式，不经过「编辑图片」的工具页。
+    mode = widget.cropOnly ? 'crop' : '';
     _load();
   }
 
@@ -101,15 +113,33 @@ class _ImageEditPageState extends State<ImageEditPage> {
   }
 
   Future<void> _applyCrop() async {
+    final only = widget.cropOnly;
     setState(() => busy = true);
     final r = Rect.fromLTRB(crop.left * imgSize.width, crop.top * imgSize.height, crop.right * imgSize.width, crop.bottom * imgSize.height);
     final out = await compute(_crop, (cur!, [r.left, r.top, r.width, r.height]));
     await _setImage(out);
+    if (!mounted) return;
+    if (only) {
+      // 拼图里重新裁剪：裁完就返回这张图，不走擦除/抠图/下一步。
+      await _popCropped();
+      return;
+    }
     setState(() {
       busy = false;
       mode = '';
       crop = const Rect.fromLTRB(0.05, 0.05, 0.95, 0.95);
     });
+  }
+
+  /// cropOnly 模式：把当前图存成文件，直接 pop 返回 [EditedImage]。
+  /// original 给的是进来时的源图，拼图页据此保留完整原图。
+  Future<void> _popCropped() async {
+    final b = cur;
+    if (b == null) return;
+    final image = await ImageStore.savePng(await compute(_toPng, b), 'img');
+    final thumb = await ImageStore.makeThumb(image);
+    if (!mounted) return;
+    Navigator.pop(context, EditedImage(image, widget.path, thumb));
   }
 
   double _scaleToImage = 1;
@@ -222,10 +252,15 @@ class _ImageEditPageState extends State<ImageEditPage> {
       return Padding(
         padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
         child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          IconButton(icon: const Icon(Icons.close), onPressed: () => setState(() => mode = '')),
+          // cropOnly 时整页就是裁剪，关闭 = 放弃返回上一页。
+          IconButton(
+            icon: const Icon(Icons.close),
+            tooltip: '取消',
+            onPressed: widget.cropOnly ? () => Navigator.pop(context) : () => setState(() => mode = ''),
+          ),
           TextButton(onPressed: () => setState(() => crop = const Rect.fromLTRB(0, 0, 1, 1)), child: const Text('全图')),
           const Text('裁剪', style: TextStyle(fontWeight: FontWeight.w600)),
-          IconButton(icon: const Icon(Icons.check), onPressed: busy ? null : _applyCrop),
+          IconButton(icon: const Icon(Icons.check), tooltip: '完成裁剪', onPressed: busy ? null : _applyCrop),
         ]),
       );
     }
@@ -265,20 +300,14 @@ class _ImageEditPageState extends State<ImageEditPage> {
 
   List<Widget> _cropOverlay(Rect r) {
     final cr = Rect.fromLTRB(r.left + crop.left * r.width, r.top + crop.top * r.height, r.left + crop.right * r.width, r.top + crop.bottom * r.height);
-    void move(Offset d, {bool l = false, bool t = false, bool rr = false, bool b = false, bool all = false}) {
+    void move(Offset d, {bool l = false, bool t = false, bool rr = false, bool b = false}) {
       final dx = d.dx / r.width, dy = d.dy / r.height;
-      var c = crop;
-      if (all) {
-        final nx = (c.left + dx).clamp(0.0, 1 - c.width), ny = (c.top + dy).clamp(0.0, 1 - c.height);
-        c = Rect.fromLTWH(nx, ny, c.width, c.height);
-      } else {
-        c = Rect.fromLTRB(
-          l ? (c.left + dx).clamp(0.0, c.right - 0.08) : c.left,
-          t ? (c.top + dy).clamp(0.0, c.bottom - 0.08) : c.top,
-          rr ? (c.right + dx).clamp(c.left + 0.08, 1.0) : c.right,
-          b ? (c.bottom + dy).clamp(c.top + 0.08, 1.0) : c.bottom,
-        );
-      }
+      final c = Rect.fromLTRB(
+        l ? (crop.left + dx).clamp(0.0, crop.right - 0.08) : crop.left,
+        t ? (crop.top + dy).clamp(0.0, crop.bottom - 0.08) : crop.top,
+        rr ? (crop.right + dx).clamp(crop.left + 0.08, 1.0) : crop.right,
+        b ? (crop.bottom + dy).clamp(crop.top + 0.08, 1.0) : crop.bottom,
+      );
       setState(() => crop = c);
     }
 
@@ -295,9 +324,57 @@ class _ImageEditPageState extends State<ImageEditPage> {
             ),
           ),
         );
+
+    // 整张图片都能下手：框很小时也能放下两根手指做捏合。
+    void start(ScaleStartDetails d) {
+      _cropBase = crop;
+      _cropPointers = d.pointerCount;
+      _cropFocalStart = d.localFocalPoint;
+      _cropScaleRef = 1;
+    }
+
+    void update(ScaleUpdateDetails d) {
+      final base = _cropBase ?? crop;
+      // 手指数变化时以当前框为新基准，scale 重新从 1 算，避免累积误差。
+      if (d.pointerCount != _cropPointers) {
+        _cropPointers = d.pointerCount;
+        _cropBase = crop;
+        _cropFocalStart = d.localFocalPoint;
+        _cropScaleRef = d.scale == 0 ? 1 : d.scale;
+        return;
+      }
+      if (d.pointerCount >= 2) {
+        final f01 = Offset((_cropFocalStart.dx / r.width).clamp(0.0, 1.0), (_cropFocalStart.dy / r.height).clamp(0.0, 1.0));
+        final pan01 = Offset((d.localFocalPoint.dx - _cropFocalStart.dx) / r.width, (d.localFocalPoint.dy - _cropFocalStart.dy) / r.height);
+        final s = _cropScaleRef == 0 ? d.scale : d.scale / _cropScaleRef;
+        setState(() => crop = scaleCrop(base, s, f01, pan01));
+      } else {
+        final f = d.focalPointDelta;
+        setState(() => crop = panCrop(crop, Offset(f.dx / r.width, f.dy / r.height)));
+      }
+    }
+
+    final borderRect = Rect.fromLTRB(cr.left - r.left, cr.top - r.top, cr.right - r.left, cr.bottom - r.top);
     return [
       Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _CropShade(cr)))),
-      Positioned.fromRect(rect: cr, child: GestureDetector(onPanUpdate: (d) => move(d.delta, all: true), child: Container(decoration: BoxDecoration(border: Border.all(color: Colors.white, width: 2))))),
+      Positioned.fromRect(
+        rect: r,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onScaleStart: start,
+          onScaleUpdate: update,
+          onScaleEnd: (_) {
+            _cropBase = null;
+            _cropPointers = 0;
+          },
+          child: Stack(children: [
+            Positioned.fromRect(
+              rect: borderRect,
+              child: IgnorePointer(child: Container(decoration: BoxDecoration(border: Border.all(color: Colors.white, width: 2)))),
+            ),
+          ]),
+        ),
+      ),
       handle(cr.topLeft, l: true, t: true),
       handle(cr.topRight, rr: true, t: true),
       handle(cr.bottomLeft, l: true, b: true),

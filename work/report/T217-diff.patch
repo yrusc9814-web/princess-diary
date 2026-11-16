@@ -1,0 +1,1217 @@
+diff --git a/source/wardrobe-android/android/app/src/main/AndroidManifest.xml b/source/wardrobe-android/android/app/src/main/AndroidManifest.xml
+index 471fee1..f566d97 100644
+--- a/source/wardrobe-android/android/app/src/main/AndroidManifest.xml
++++ b/source/wardrobe-android/android/app/src/main/AndroidManifest.xml
+@@ -3,6 +3,11 @@
+     <uses-permission android:name="android.permission.CAMERA"/>
+     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
++    <!-- 自动备份写到公共目录 Documents/公主日记备份：Android 9 及以下需要写外部存储；
++         Android 10+ 走 MediaStore，不需要该权限 -->
++    <uses-permission
++        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
++        android:maxSdkVersion="28"/>
+ 
+     <application
+         android:label="公主日记"
+diff --git a/source/wardrobe-android/android/app/src/main/kotlin/com/mywardrobe/my_wardrobe/MainActivity.kt b/source/wardrobe-android/android/app/src/main/kotlin/com/mywardrobe/my_wardrobe/MainActivity.kt
+index 5fc7dd0..d6edc6e 100644
+--- a/source/wardrobe-android/android/app/src/main/kotlin/com/mywardrobe/my_wardrobe/MainActivity.kt
++++ b/source/wardrobe-android/android/app/src/main/kotlin/com/mywardrobe/my_wardrobe/MainActivity.kt
+@@ -1,5 +1,176 @@
+ package com.mywardrobe.my_wardrobe
+ 
++import android.Manifest
++import android.content.ContentValues
++import android.content.pm.PackageManager
++import android.net.Uri
++import android.os.Build
++import android.os.Environment
++import android.provider.MediaStore
+ import io.flutter.embedding.android.FlutterActivity
++import io.flutter.embedding.engine.FlutterEngine
++import io.flutter.plugin.common.MethodChannel
++import java.io.File
+ 
+-class MainActivity : FlutterActivity()
++/**
++ * 自动备份的落盘通道：
++ *  - Android 10+ 走 MediaStore.Files（external_primary），RELATIVE_PATH = Documents/公主日记备份（公共目录，卸载不丢）；
++ *    Downloads 集合只允许 Download/ 子目录，写 Documents 会被系统拒绝，所以统一用 Files 集合
++ *  - Android 9 及以下走 WRITE_EXTERNAL_STORAGE 直接写公共 Documents
++ * Dart 侧先把 .wrdx 生成在临时目录，再交给这里拷进去；删除旧备份也在这里做。
++ */
++class MainActivity : FlutterActivity() {
++    private val channelName = "princess_diary/backup"
++    // list/save/delete 三处共用；Files 集合才允许任意 RELATIVE_PATH（API 29+ 用 external_primary）
++    private val backupCollection: Uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
++    private val relPath = "Documents/公主日记备份"
++    private val prefix = "gongzhuriji_"
++    private val suffix = ".wrdx"
++
++    private var pendingResult: MethodChannel.Result? = null
++    private var pendingAction: (() -> Unit)? = null
++
++    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
++        super.configureFlutterEngine(flutterEngine)
++        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
++            when (call.method) {
++                "listBackups" -> result.success(listBackups())
++                "saveBackup" -> {
++                    val path = call.argument<String>("path")
++                    val name = call.argument<String>("name")
++                    if (path == null || name == null) {
++                        result.error("bad_args", "path/name 不能为空", null)
++                        return@setMethodCallHandler
++                    }
++                    withStoragePermission(result) { saveBackup(File(path), name, result) }
++                }
++                "deleteBackup" -> {
++                    val name = call.argument<String>("name")
++                    if (name == null) {
++                        result.error("bad_args", "name 不能为空", null)
++                        return@setMethodCallHandler
++                    }
++                    withStoragePermission(result) {
++                        try {
++                            deleteBackup(name)
++                            result.success(true)
++                        } catch (e: Exception) {
++                            result.error("delete_failed", e.message, null)
++                        }
++                    }
++                }
++                else -> result.notImplemented()
++            }
++        }
++    }
++
++    /** Android 9 及以下需要写外部存储权限；先请求再执行。 */
++    private fun withStoragePermission(result: MethodChannel.Result, action: () -> Unit) {
++        if (Build.VERSION.SDK_INT >= 29 ||
++            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
++        ) {
++            action()
++            return
++        }
++        pendingResult = result
++        pendingAction = action
++        requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 21701)
++    }
++
++    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
++        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
++        if (requestCode != 21701) return
++        val action = pendingAction
++        val result = pendingResult
++        pendingAction = null
++        pendingResult = null
++        val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
++        if (granted && action != null) {
++            action()
++        } else {
++            result?.error("permission_denied", "没有外部存储写入权限", null)
++        }
++    }
++
++    private fun legacyDir(): File =
++        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "公主日记备份")
++
++    private fun listBackups(): List<String> {
++        val out = ArrayList<String>()
++        if (Build.VERSION.SDK_INT >= 29) {
++            val projection = arrayOf(MediaStore.MediaColumns.DISPLAY_NAME)
++            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
++            val args = arrayOf("$relPath%", "$prefix%")
++            contentResolver.query(backupCollection, projection, selection, args, null)?.use { c ->
++                while (c.moveToNext()) {
++                    val n = c.getString(0) ?: continue
++                    if (n.startsWith(prefix) && n.endsWith(suffix)) out.add(n)
++                }
++            }
++        } else {
++            legacyDir().listFiles()?.forEach { f ->
++                if (f.isFile && f.name.startsWith(prefix) && f.name.endsWith(suffix)) out.add(f.name)
++            }
++        }
++        out.sort()
++        return out
++    }
++
++    private fun saveBackup(src: File, name: String, result: MethodChannel.Result) {
++        try {
++            if (!src.exists()) throw IllegalStateException("临时备份文件不存在")
++            if (Build.VERSION.SDK_INT >= 29) {
++                val resolver = contentResolver
++                // 同一分钟再次备份时文件名相同：先删掉同名旧文件，保证目录里只有一份
++                deleteBackup(name)
++                val values = ContentValues().apply {
++                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
++                    put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
++                    put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
++                    put(MediaStore.MediaColumns.IS_PENDING, 1)
++                }
++                val uri: Uri = resolver.insert(backupCollection, values)
++                    ?: throw IllegalStateException("MediaStore 无法创建文件")
++                try {
++                    resolver.openOutputStream(uri)?.use { out ->
++                        src.inputStream().use { it.copyTo(out) }
++                    } ?: throw IllegalStateException("无法写入文件")
++                    val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
++                    resolver.update(uri, done, null, null)
++                } catch (e: Exception) {
++                    resolver.delete(uri, null, null)
++                    throw e
++                }
++                result.success(queryName(uri) ?: name)
++            } else {
++                val dir = legacyDir()
++                if (!dir.exists() && !dir.mkdirs()) throw IllegalStateException("无法创建备份目录")
++                var target = File(dir, name)
++                // 同名文件直接覆盖（与 MediaStore 行为不同，去掉再拷）
++                if (target.exists()) target.delete()
++                src.copyTo(target, overwrite = true)
++                result.success(name)
++            }
++        } catch (e: Exception) {
++            result.error("save_failed", e.message, null)
++        }
++    }
++
++    private fun queryName(uri: Uri): String? {
++        contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use { c ->
++            if (c.moveToFirst()) return c.getString(0)
++        }
++        return null
++    }
++
++    private fun deleteBackup(name: String) {
++        if (Build.VERSION.SDK_INT >= 29) {
++            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ?"
++            val args = arrayOf("$relPath%", name)
++            contentResolver.delete(backupCollection, selection, args)
++        } else {
++            val f = File(legacyDir(), name)
++            if (f.exists()) f.delete()
++        }
++    }
++}
+diff --git a/source/wardrobe-android/lib/main.dart b/source/wardrobe-android/lib/main.dart
+index ef5c888..007d546 100644
+--- a/source/wardrobe-android/lib/main.dart
++++ b/source/wardrobe-android/lib/main.dart
+@@ -1,3 +1,5 @@
++import 'dart:async';
++
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_localizations/flutter_localizations.dart';
+@@ -8,6 +10,7 @@ import 'pages/home_page.dart';
+ import 'pages/mine_page.dart';
+ import 'pages/outfits_page.dart';
+ import 'pages/wardrobe_page.dart';
++import 'services/auto_backup.dart';
+ import 'services/images.dart';
+ import 'services/settings.dart';
+ import 'widgets/common.dart';
+@@ -17,6 +20,9 @@ Future<void> main() async {
+   await Settings.init();
+   await ImageStore.init();
+   await AppDb.I.open();
++  // 自动备份：注册每日 03:00 的周期任务，并按需补跑一次（失败不影响启动，不阻塞首屏）
++  unawaited(AutoBackupService.syncSchedule().catchError((Object e) => debugPrint('schedule auto backup failed: $e')));
++  unawaited(AutoBackupService.maybeRunOnLaunch());
+   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: Colors.transparent, statusBarIconBrightness: Brightness.dark, systemNavigationBarColor: Colors.white, systemNavigationBarIconBrightness: Brightness.dark));
+   runApp(const WardrobeApp());
+ }
+diff --git a/source/wardrobe-android/lib/pages/backup_page.dart b/source/wardrobe-android/lib/pages/backup_page.dart
+index d27cc4b..97d9831 100644
+--- a/source/wardrobe-android/lib/pages/backup_page.dart
++++ b/source/wardrobe-android/lib/pages/backup_page.dart
+@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
+ import 'package:flutter/material.dart';
+ import 'package:share_plus/share_plus.dart';
+ 
++import '../services/auto_backup.dart';
+ import '../services/backup.dart';
+ import '../services/settings.dart';
+ import '../widgets/common.dart';
+@@ -65,6 +66,102 @@ class _BackupPageState extends State<BackupPage> {
+     if (mounted) setState(() => busy = false);
+   }
+ 
++  Future<void> _toggleAuto(bool on) async {
++    Settings.autoBackupEnabled = on;
++    setState(() {});
++    try {
++      if (on) {
++        await AutoBackupService.schedule();
++        toast(null, '已开启，每天凌晨 3 点自动备份');
++      } else {
++        await AutoBackupService.cancel();
++        toast(null, '已关闭自动备份');
++      }
++    } catch (e) {
++      toast(null, '设置失败：$e', style: 'dark');
++    }
++  }
++
++  /// 手动触发一次（验证用）：立刻按自动备份的完整流程跑一遍。
++  Future<void> _runAutoNow() async {
++    setState(() {
++      busy = true;
++      busyText = '正在检查并备份…';
++    });
++    try {
++      final r = await AutoBackup().run();
++      if (!mounted) return;
++      toast(null, r.skipped ? '数据无变化，已跳过' : (r.ok ? '已备份：${r.fileName}' : '备份失败：${r.error}'), style: r.ok ? 'success' : 'dark');
++    } catch (e) {
++      toast(null, '备份失败：$e', style: 'dark');
++    }
++    if (mounted) setState(() => busy = false);
++  }
++
++  Widget _autoCard() {
++    final on = Settings.autoBackupEnabled;
++    final at = Settings.autoBackupAt;
++    final file = Settings.autoBackupFile;
++    final check = Settings.autoBackupLastCheck;
++    final err = Settings.autoBackupError;
++    final skipped = check > 0 && check > at;
++    return Container(
++      padding: const EdgeInsets.fromLTRB(16, 8, 12, 14),
++      decoration: BoxDecoration(
++        color: const Color(0xEEFFFFFF),
++        boxShadow: kCardShadow,
++        borderRadius: BorderRadius.circular(22),
++        border: Border.all(color: kPinkBorder),
++      ),
++      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        Row(children: [
++          const Icon(Icons.schedule, color: kRose),
++          const SizedBox(width: 8),
++          const Expanded(
++            child: Text('自动备份', style: TextStyle(color: kInk, fontSize: 17, fontWeight: FontWeight.w800)),
++          ),
++          Switch(value: on, onChanged: busy ? null : _toggleAuto),
++        ]),
++        Text(
++          on ? '每天凌晨 3 点左右自动备份一次' : '已关闭，不会自动备份',
++          style: const TextStyle(color: kGrayText, fontSize: 13),
++        ),
++        const SizedBox(height: 10),
++        _kv('上次自动备份', at == 0 ? '暂无' : _fmt(at)),
++        _kv('备份文件', file.isEmpty ? '暂无' : file),
++        _kv('上次检查', check == 0 ? '暂无' : _fmt(check)),
++        if (skipped) const Padding(
++          padding: EdgeInsets.only(top: 2),
++          child: Text('数据无变化，已跳过', style: TextStyle(color: kRose, fontSize: 13, fontWeight: FontWeight.w600)),
++        ),
++        if (err.isNotEmpty) Padding(
++          padding: const EdgeInsets.only(top: 2),
++          child: Text('上次失败：$err', style: const TextStyle(color: kRoseDark, fontSize: 12)),
++        ),
++        const SizedBox(height: 10),
++        const Text('每天凌晨 3 点自动备份到 文档/公主日记备份，只保留最新一份；手机省电可能让时间稍晚。',
++            style: TextStyle(fontSize: 12, color: kGrayText, height: 1.6)),
++        const SizedBox(height: 8),
++        Align(
++          alignment: Alignment.centerRight,
++          child: TextButton.icon(
++            onPressed: busy ? null : _runAutoNow,
++            icon: const Icon(Icons.play_circle_outline, size: 18),
++            label: const Text('立即检查并备份'),
++          ),
++        ),
++      ]),
++    );
++  }
++
++  Widget _kv(String k, String v) => Padding(
++        padding: const EdgeInsets.symmetric(vertical: 3),
++        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
++          SizedBox(width: 92, child: Text(k, style: const TextStyle(fontSize: 13, color: kGrayText))),
++          Expanded(child: Text(v, style: const TextStyle(fontSize: 13, color: kInk))),
++        ]),
++      );
++
+   @override
+   Widget build(BuildContext context) {
+     final last = Settings.lastExport;
+@@ -102,6 +199,8 @@ class _BackupPageState extends State<BackupPage> {
+               ),
+             ]),
+           ),
++          const SizedBox(height: 20),
++          _autoCard(),
+           const SizedBox(height: 24),
+           const Text('手动备份与迁移', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk)),
+           const SizedBox(height: 8),
+@@ -133,7 +232,8 @@ class _BackupPageState extends State<BackupPage> {
+             ),
+           ]),
+           const SizedBox(height: 18),
+-          const Text('备份包为 .wrdx 文件（数据 + 全部图片），可通过微信、网盘、电脑等保存。也支持导入 1.0 版导出的 .zip 备份。',
++          const Text('备份包为 .wrdx 文件（数据 + 全部图片），文件名为 gongzhuriji_年-月-日_时分.wrdx，可通过微信、网盘、电脑等保存。'
++              '也支持导入 1.0 版导出的 .zip 备份。',
+               style: TextStyle(fontSize: 12, color: kGrayText, height: 1.6)),
+         ]),
+         if (busy)
+diff --git a/source/wardrobe-android/lib/services/backup.dart b/source/wardrobe-android/lib/services/backup.dart
+index 534378f..1860edd 100644
+--- a/source/wardrobe-android/lib/services/backup.dart
++++ b/source/wardrobe-android/lib/services/backup.dart
+@@ -13,26 +13,44 @@ import 'settings.dart';
+ /// 备份包 .wrdx = zip（data.json 数据库导出 + images/ 全部图片）。
+ /// 导入兼容 1.0 版导出的 .zip（data.json version 1）。
+ class Backup {
++  /// 备份文件名：`gongzhuriji_yyyy-MM-dd_HHmm.wrdx`，例 `gongzhuriji_2026-11-16_0300.wrdx`。
++  /// [time] 默认当前时间，测试可注入。
++  static String fileNameFor(DateTime time) =>
++      '$autoBackupPrefix${DateFormat('yyyy-MM-dd_HHmm').format(time)}$autoBackupSuffix';
++
++  /// 自动备份文件名前缀 / 后缀，也用于在公共目录里查找旧文件。
++  static const autoBackupPrefix = 'gongzhuriji_';
++  static const autoBackupSuffix = '.wrdx';
++
++  /// 手动「导出备份包」：在临时目录生成 .wrdx（同样用新命名），交给页面分享。
+   static Future<File> export() async {
+-    final tmp = await getTemporaryDirectory();
+-    final name = 'WardrobeExport_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.wrdx';
+-    final out = File(p.join(tmp.path, name));
++    final out = File(p.join((await getTemporaryDirectory()).path, fileNameFor(DateTime.now())));
++    await writeArchive(out, await AppDb.I.exportTables());
++    Settings.lastExport = DateTime.now().millisecondsSinceEpoch;
++    return out;
++  }
++
++  /// 把导出表 JSON + ImageStore 里的全部图片写成一个 .wrdx。[out] 若已存在会先删掉。
++  static Future<void> writeArchive(File out, Map<String, Object> tables) async {
+     if (await out.exists()) await out.delete();
+-    final json = File(p.join(tmp.path, 'data.json'));
+-    await json.writeAsString(jsonEncode(await AppDb.I.exportTables()));
++    final json = File(p.join(out.parent.path, 'data_${DateTime.now().microsecondsSinceEpoch}.json'));
++    await json.writeAsString(jsonEncode(tables));
+     final enc = ZipFileEncoder();
+-    enc.create(out.path);
+-    await enc.addFile(json, 'data.json');
+-    final dir = Directory(ImageStore.root);
+-    if (await dir.exists()) {
+-      await for (final f in dir.list()) {
+-        if (f is File) await enc.addFile(f, 'images/${p.basename(f.path)}');
++    try {
++      enc.create(out.path);
++      await enc.addFile(json, 'data.json');
++      final dir = Directory(ImageStore.root);
++      if (await dir.exists()) {
++        await for (final f in dir.list()) {
++          if (f is File) await enc.addFile(f, 'images/${p.basename(f.path)}');
++        }
+       }
++      await enc.close();
++    } finally {
++      try {
++        if (await json.exists()) await json.delete();
++      } catch (_) {}
+     }
+-    await enc.close();
+-    await json.delete();
+-    Settings.lastExport = DateTime.now().millisecondsSinceEpoch;
+-    return out;
+   }
+ 
+   /// 返回导入的衣物数
+diff --git a/source/wardrobe-android/lib/services/settings.dart b/source/wardrobe-android/lib/services/settings.dart
+index f7ef381..0bff4ab 100644
+--- a/source/wardrobe-android/lib/services/settings.dart
++++ b/source/wardrobe-android/lib/services/settings.dart
+@@ -42,13 +42,44 @@ class Settings {
+   // AI 试衣（阿里云百炼）
+   static String get dashscopeKey => p.getString('dashscope_key') ?? '';
+   static set dashscopeKey(String v) => p.setString('dashscope_key', v.trim());
+-  static String get tryOnModel => p.getString('tryon_model') ?? 'aitryon';
++  /// 旧值迁移：aitryon-plus（效果更好）→ qwen-image-3.0-pro；aitryon 及其他未知值 → qwen-image-3.0。
++  static String get tryOnModel {
++    final v = p.getString('tryon_model');
++    switch (v) {
++      case 'qwen-image-3.0':
++      case 'qwen-image-3.0-pro':
++        return v!;
++      case 'aitryon-plus':
++        return 'qwen-image-3.0-pro';
++      default:
++        return 'qwen-image-3.0';
++    }
++  }
+   static set tryOnModel(String v) => p.setString('tryon_model', v);
+ 
+   // 备份
+   static int get lastExport => p.getInt('last_export') ?? 0;
+   static set lastExport(int v) => p.setInt('last_export', v);
+ 
++  // 自动备份（每天凌晨 3 点）
++  static bool get autoBackupEnabled => p.getBool('auto_backup_enabled') ?? true;
++  static set autoBackupEnabled(bool v) => p.setBool('auto_backup_enabled', v);
++  /// 上次自动备份成功时的数据指纹（sha256）
++  static String get autoBackupHash => p.getString('auto_backup_hash') ?? '';
++  static set autoBackupHash(String v) => p.setString('auto_backup_hash', v);
++  /// 上次自动备份成功的时间（毫秒）
++  static int get autoBackupAt => p.getInt('auto_backup_at') ?? 0;
++  static set autoBackupAt(int v) => p.setInt('auto_backup_at', v);
++  /// 上次自动备份成功的文件名
++  static String get autoBackupFile => p.getString('auto_backup_file') ?? '';
++  static set autoBackupFile(String v) => p.setString('auto_backup_file', v);
++  /// 上次自动备份「检查」的时间（毫秒），无变化跳过时也会更新
++  static int get autoBackupLastCheck => p.getInt('auto_backup_last_check') ?? 0;
++  static set autoBackupLastCheck(int v) => p.setInt('auto_backup_last_check', v);
++  /// 上次自动备份失败原因（空串表示无）
++  static String get autoBackupError => p.getString('auto_backup_error') ?? '';
++  static set autoBackupError(String v) => p.setString('auto_backup_error', v);
++
+   // 首页
+   static String get recordedToday => p.getString('recorded_today') ?? '';
+   static set recordedToday(String v) => p.setString('recorded_today', v);
+diff --git a/source/wardrobe-android/pubspec.lock b/source/wardrobe-android/pubspec.lock
+index a3dc32d..e3e088e 100644
+--- a/source/wardrobe-android/pubspec.lock
++++ b/source/wardrobe-android/pubspec.lock
+@@ -74,7 +74,7 @@ packages:
+     source: hosted
+     version: "0.3.5+5"
+   crypto:
+-    dependency: transitive
++    dependency: "direct main"
+     description:
+       name: crypto
+       sha256: e3626ae6270383c9e3a549f34c9e4cd26c09ae6a9adaab2bf4737a00340efdc4
+@@ -914,6 +914,54 @@ packages:
+       url: "https://pub.flutter-io.cn"
+     source: hosted
+     version: "5.15.0"
++  workmanager:
++    dependency: "direct main"
++    description:
++      name: workmanager
++      sha256: "96b09a4a852ec487d29371f27031dab80ce2e260911e2dbe0f904951e22a3956"
++      url: "https://pub.flutter-io.cn"
++    source: hosted
++    version: "0.10.10"
++  workmanager_android:
++    dependency: transitive
++    description:
++      name: workmanager_android
++      sha256: ffe8aa061885370c9363f7ae2d2196d31855217c58e7b15899d915d36c768c4a
++      url: "https://pub.flutter-io.cn"
++    source: hosted
++    version: "0.10.9"
++  workmanager_apple:
++    dependency: transitive
++    description:
++      name: workmanager_apple
++      sha256: "9e0ca0b857df986b37ca964ffa3b21990e1bc0f7935356a9706b47e5b71a7524"
++      url: "https://pub.flutter-io.cn"
++    source: hosted
++    version: "0.9.11"
++  workmanager_linux:
++    dependency: transitive
++    description:
++      name: workmanager_linux
++      sha256: "7d8520e1103b910a43d8bafe37ec2415f4c7c148afcb1eee0ec73ae67b4cdd22"
++      url: "https://pub.flutter-io.cn"
++    source: hosted
++    version: "0.1.1+1"
++  workmanager_platform_interface:
++    dependency: transitive
++    description:
++      name: workmanager_platform_interface
++      sha256: a1022dca1284d64ba8bbe046edc9089cc5158b3d0e2cf9f68c7cde2fbf89746c
++      url: "https://pub.flutter-io.cn"
++    source: hosted
++    version: "0.10.5"
++  workmanager_web:
++    dependency: transitive
++    description:
++      name: workmanager_web
++      sha256: "2ac481ade599bdd957ee2891be09a0c34be87923a2c3ca4dfe36add6fc735ffd"
++      url: "https://pub.flutter-io.cn"
++    source: hosted
++    version: "0.2.0"
+   xdg_directories:
+     dependency: transitive
+     description:
+diff --git a/source/wardrobe-android/pubspec.yaml b/source/wardrobe-android/pubspec.yaml
+index 9b7af32..00b831f 100644
+--- a/source/wardrobe-android/pubspec.yaml
++++ b/source/wardrobe-android/pubspec.yaml
+@@ -1,7 +1,7 @@
+ name: my_wardrobe
+ description: 自用电子衣橱（本地存储 + 端侧抠图 + 天气穿搭推荐）
+ publish_to: 'none'
+-version: 2.1.3+6
++version: 2.1.4+7
+ 
+ environment:
+   sdk: '>=3.4.0 <4.0.0'
+@@ -26,6 +26,8 @@ dependencies:
+   archive: ^3.6.1
+   webview_flutter: ^4.14.1
+   url_launcher: ^6.3.3
++  workmanager: ^0.10.10
++  crypto: ^3.0.8
+ 
+ dev_dependencies:
+   flutter_test:
+diff --git a/source/wardrobe-android/lib/services/auto_backup.dart b/source/wardrobe-android/lib/services/auto_backup.dart
+new file mode 100644
+index 0000000..c018e7a
+--- /dev/null
++++ b/source/wardrobe-android/lib/services/auto_backup.dart
+@@ -0,0 +1,358 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:ui' show DartPluginRegistrant;
++
++import 'package:crypto/crypto.dart';
++import 'package:flutter/foundation.dart';
++import 'package:flutter/services.dart';
++import 'package:path/path.dart' as p;
++import 'package:path_provider/path_provider.dart';
++import 'package:workmanager/workmanager.dart';
++
++import '../data/db.dart';
++import 'backup.dart';
++import 'images.dart';
++import 'settings.dart';
++
++/// 图片目录里一个文件的名字 + 大小 + 修改时间，用于算数据指纹。
++@immutable
++class ImageStamp {
++  const ImageStamp(this.name, this.size, this.mtimeMs);
++  final String name;
++  final int size;
++  final int mtimeMs;
++
++  @override
++  String toString() => '$name|$size|$mtimeMs';
++}
++
++/// 自动备份用到的设置项读写。抽成接口便于测试注入内存实现。
++abstract class AutoBackupStore {
++  String get hash;
++  set hash(String v);
++  int get backupAt;
++  set backupAt(int v);
++  String get file;
++  set file(String v);
++  int get lastCheck;
++  set lastCheck(int v);
++  String get error;
++  set error(String v);
++  bool get enabled;
++  set enabled(bool v);
++}
++
++/// 正式实现：存进 SharedPreferences。
++class SettingsAutoBackupStore implements AutoBackupStore {
++  const SettingsAutoBackupStore();
++  @override
++  String get hash => Settings.autoBackupHash;
++  @override
++  set hash(String v) => Settings.autoBackupHash = v;
++  @override
++  int get backupAt => Settings.autoBackupAt;
++  @override
++  set backupAt(int v) => Settings.autoBackupAt = v;
++  @override
++  String get file => Settings.autoBackupFile;
++  @override
++  set file(String v) => Settings.autoBackupFile = v;
++  @override
++  int get lastCheck => Settings.autoBackupLastCheck;
++  @override
++  set lastCheck(int v) => Settings.autoBackupLastCheck = v;
++  @override
++  String get error => Settings.autoBackupError;
++  @override
++  set error(String v) => Settings.autoBackupError = v;
++  @override
++  bool get enabled => Settings.autoBackupEnabled;
++  @override
++  set enabled(bool v) => Settings.autoBackupEnabled = v;
++}
++
++/// 内存实现（测试用）。
++class MemoryAutoBackupStore implements AutoBackupStore {
++  MemoryAutoBackupStore({
++    this.hash = '',
++    this.backupAt = 0,
++    this.file = '',
++    this.lastCheck = 0,
++    this.error = '',
++    this.enabled = true,
++  });
++
++  @override
++  String hash;
++  @override
++  int backupAt;
++  @override
++  String file;
++  @override
++  int lastCheck;
++  @override
++  String error;
++  @override
++  bool enabled;
++}
++
++/// 备份文件的最终去处：手机公共目录 `Documents/公主日记备份/`。
++abstract class BackupTarget {
++  /// 目录里已有的 `gongzhuriji_*.wrdx` 文件名。
++  Future<List<String>> list();
++
++  /// 把本地文件放进去，返回写入后的实际文件名（MediaStore 可能重名加后缀）。
++  Future<String> put(File local, String fileName);
++
++  /// 按文件名删除。
++  Future<void> delete(String fileName);
++}
++
++/// 通过 MethodChannel 交给原生写入 MediaStore（Android 10+）或公共目录（Android 9-）。
++class ChannelBackupTarget implements BackupTarget {
++  static const channel = MethodChannel('princess_diary/backup');
++  const ChannelBackupTarget();
++
++  @override
++  Future<List<String>> list() async {
++    final r = await channel.invokeListMethod<String>('listBackups');
++    return r ?? const [];
++  }
++
++  @override
++  Future<String> put(File local, String fileName) async {
++    final r = await channel.invokeMethod<String>('saveBackup', {'path': local.path, 'name': fileName});
++    if (r == null || r.isEmpty) throw StateError('保存备份失败');
++    return r;
++  }
++
++  @override
++  Future<void> delete(String fileName) => channel.invokeMethod<void>('deleteBackup', {'name': fileName});
++}
++
++/// 一次自动备份的结果。
++class AutoBackupResult {
++  const AutoBackupResult({required this.ok, required this.skipped, this.fileName, this.error});
++  final bool ok;
++  final bool skipped;
++  final String? fileName;
++  final String? error;
++
++  @override
++  String toString() => 'AutoBackupResult(ok: $ok, skipped: $skipped, file: $fileName, error: $error)';
++}
++
++/// 每天 03:00 自动备份：算指纹 → 相同跳过 → 不同则写新文件、删旧文件。
++class AutoBackup {
++  AutoBackup({
++    AutoBackupStore? store,
++    BackupTarget? target,
++    Future<Map<String, Object>> Function()? readTables,
++    Future<List<ImageStamp>> Function()? readImages,
++    Future<void> Function(File out, Map<String, Object> tables)? writeArchive,
++    Future<Directory> Function()? tempDir,
++    DateTime Function()? now,
++  })  : store = store ?? const SettingsAutoBackupStore(),
++        target = target ?? const ChannelBackupTarget(),
++        _readTables = readTables ?? (() => AppDb.I.exportTables()),
++        _readImages = readImages ?? _listImageDir,
++        _writeArchive = writeArchive ?? Backup.writeArchive,
++        _tempDir = tempDir ?? getTemporaryDirectory,
++        _now = now ?? DateTime.now;
++
++  final AutoBackupStore store;
++  final BackupTarget target;
++  final Future<Map<String, Object>> Function() _readTables;
++  final Future<List<ImageStamp>> Function() _readImages;
++  final Future<void> Function(File out, Map<String, Object> tables) _writeArchive;
++  final Future<Directory> Function() _tempDir;
++  final DateTime Function() _now;
++
++  static Future<List<ImageStamp>> _listImageDir() async {
++    final dir = Directory(ImageStore.root);
++    final out = <ImageStamp>[];
++    if (!await dir.exists()) return out;
++    await for (final f in dir.list()) {
++      if (f is! File) continue;
++      final st = await f.stat();
++      out.add(ImageStamp(p.basename(f.path), st.size, st.modified.millisecondsSinceEpoch));
++    }
++    return out;
++  }
++
++  /// 数据指纹：exportTables() 的 JSON（去掉每次都会变的 exportedAt）+ 图片目录每个文件的
++  /// 文件名/大小/修改时间，按名称排序后算 sha256。
++  static String fingerprint(Map<String, Object> tables, List<ImageStamp> images) {
++    final sorted = <String, Object>{};
++    for (final k in tables.keys.toList()..sort()) {
++      if (k == 'exportedAt') continue;
++      sorted[k] = tables[k]!;
++    }
++    final imgs = [...images]..sort((a, b) => a.name.compareTo(b.name));
++    final b = StringBuffer(jsonEncode(sorted));
++    for (final i in imgs) {
++      b.write('\n${i.name}|${i.size}|${i.mtimeMs}');
++    }
++    return sha256.convert(utf8.encode(b.toString())).toString();
++  }
++
++  /// 下一个本地 03:00 距 [now] 的时长。正好 03:00 整返回 24 小时。
++  static Duration untilNextRun(DateTime now) {
++    var next = DateTime(now.year, now.month, now.day, 3);
++    if (!next.isAfter(now)) next = next.add(const Duration(days: 1));
++    return next.difference(now);
++  }
++
++  /// 是否该在启动时补跑：距上次检查超过 24 小时。
++  static bool shouldRunOnLaunch(int lastCheckMs, DateTime now) =>
++      lastCheckMs <= 0 || now.millisecondsSinceEpoch - lastCheckMs >= const Duration(hours: 24).inMilliseconds;
++
++  Future<AutoBackupResult> run() async {
++    final now = _now();
++    final tables = await _readTables();
++    final images = await _readImages();
++    final fp = fingerprint(tables, images);
++
++    // 和上次自动备份比：数据完全一样只更新检查时间，不写文件。
++    if (fp == store.hash && store.hash.isNotEmpty) {
++      store.lastCheck = now.millisecondsSinceEpoch;
++      return const AutoBackupResult(ok: true, skipped: true);
++    }
++
++    final name = Backup.fileNameFor(now);
++    final tmp = File(p.join((await _tempDir()).path, name));
++    String written;
++    try {
++      await _writeArchive(tmp, tables);
++      written = await target.put(tmp, name);
++    } catch (e) {
++      // 写失败：旧文件保留、指纹不动，只记下错误。
++      try {
++        if (await tmp.exists()) await tmp.delete();
++      } catch (_) {}
++      // 失败不更新指纹、也不更新检查时间，下次启动还会重试。
++      store.error = '$e';
++      return AutoBackupResult(ok: false, skipped: false, error: '$e');
++    } finally {
++      try {
++        if (await tmp.exists()) await tmp.delete();
++      } catch (_) {}
++    }
++
++    // 新文件已经写好，再删掉除最新一份以外的所有旧备份。
++    try {
++      for (final old in await target.list()) {
++        if (old == written) continue;
++        if (!old.startsWith(Backup.autoBackupPrefix)) continue;
++        try {
++          await target.delete(old);
++        } catch (_) {}
++      }
++      store.hash = fp;
++      store.backupAt = now.millisecondsSinceEpoch;
++      store.file = written;
++      store.lastCheck = now.millisecondsSinceEpoch;
++      store.error = '';
++      return AutoBackupResult(ok: true, skipped: false, fileName: written);
++    } catch (e) {
++      store.error = '$e';
++      store.lastCheck = now.millisecondsSinceEpoch;
++      return AutoBackupResult(ok: false, skipped: false, fileName: written, error: '$e');
++    }
++  }
++}
++
++/// 后台 isolate 的工作入口 + 兜底逻辑。
++class AutoBackupService {
++  AutoBackupService._();
++
++  static const taskName = 'princessDiaryAutoBackup';
++  static const uniqueName = 'com.mywardrobe.my_wardrobe.autoBackup';
++
++  /// 在后台 isolate 里把插件 + sqflite / ImageStore / Settings 都初始化好。
++  static Future<void> initBackground() async {
++    // 后台 isolate 不会自动跑 Dart 侧的插件注册，必须先初始化，否则
++    // path_provider / shared_preferences / sqflite 的通道拿不到实现。
++    DartPluginRegistrant.ensureInitialized();
++    await Settings.init();
++    await ImageStore.init();
++    await AppDb.I.open();
++  }
++
++  /// 注册每天一次的周期任务：首次延迟到下一个本地 03:00，之后每 24 小时一次。
++  /// 约束不要求联网/充电，省电模式下系统可能推迟。
++  static Future<void> schedule({DateTime? now}) async {
++    final delay = AutoBackup.untilNextRun(now ?? DateTime.now());
++    await Workmanager().initialize(autoBackupCallbackDispatcher);
++    await Workmanager().registerPeriodicTask(
++      uniqueName,
++      taskName,
++      frequency: const Duration(hours: 24),
++      initialDelay: delay,
++      // keep：已经注册过的任务不重建，避免每次启动都把 03:00 的计时往后推
++      existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
++      constraints: Constraints(networkType: NetworkType.notRequired, requiresCharging: false, requiresBatteryNotLow: false),
++    );
++  }
++
++  /// 关掉开关时取消任务。
++  static Future<void> cancel() async {
++    await Workmanager().initialize(autoBackupCallbackDispatcher);
++    await Workmanager().cancelByUniqueName(uniqueName);
++  }
++
++  /// 按当前开关状态注册或取消（启动时调用，开关默认开）。
++  static Future<void> syncSchedule() async {
++    if (Settings.autoBackupEnabled) {
++      await schedule();
++    } else {
++      await cancel();
++    }
++  }
++
++  static bool _launchedThisProcess = false;
++
++  /// 打开 App 时调用：开关开着且距上次检查超过 24 小时，就在后台补跑一次，不阻塞界面。
++  static Future<void> maybeRunOnLaunch() async {
++    if (!Settings.autoBackupEnabled) return;
++    if (_launchedThisProcess) return;
++    if (!AutoBackup.shouldRunOnLaunch(Settings.autoBackupLastCheck, DateTime.now())) return;
++    _launchedThisProcess = true;
++    unawaited(Future(() async {
++      try {
++        final r = await AutoBackup().run();
++        debugPrint('auto backup on launch: $r');
++      } catch (e) {
++        Settings.autoBackupError = '$e';
++        debugPrint('auto backup on launch failed: $e');
++      }
++    }));
++  }
++}
++
++/// WorkManager 后台任务入口（顶层函数，必须带 vm:entry-point）。
++@pragma('vm:entry-point')
++void autoBackupCallbackDispatcher() {
++  WorkmanagerController.execute();
++}
++
++/// 对 workmanager 的薄封装，方便单测时替换。
++class WorkmanagerController {
++  WorkmanagerController._();
++  static Future<void> execute() async {
++    Workmanager().executeTask((task, inputData) async {
++      try {
++        await AutoBackupService.initBackground();
++        if (!Settings.autoBackupEnabled) return true;
++        final r = await AutoBackup().run();
++        debugPrint('auto backup task: $r');
++        return r.ok;
++      } catch (e) {
++        Settings.autoBackupError = '$e';
++        debugPrint('auto backup task failed: $e');
++        return false;
++      }
++    });
++  }
++}
+diff --git a/source/wardrobe-android/test/t217_auto_backup_test.dart b/source/wardrobe-android/test/t217_auto_backup_test.dart
+new file mode 100644
+index 0000000..e58a0dc
+--- /dev/null
++++ b/source/wardrobe-android/test/t217_auto_backup_test.dart
+@@ -0,0 +1,283 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:archive/archive_io.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:my_wardrobe/services/images.dart';
++import 'package:my_wardrobe/services/auto_backup.dart';
++import 'package:my_wardrobe/services/backup.dart';
++import 'package:path/path.dart' as p;
++
++/// 内存里的备份目录，模拟 MediaStore / 公共目录。
++class FakeTarget implements BackupTarget {
++  FakeTarget([List<String>? initial]) : files = [...?initial];
++
++  final List<String> files;
++  bool failPut = false;
++  int puts = 0;
++  int deletes = 0;
++
++  @override
++  Future<List<String>> list() async => [...files];
++
++  @override
++  Future<String> put(File local, String fileName) async {
++    puts++;
++    if (failPut) throw const FileSystemException('磁盘已满');
++    if (!local.existsSync()) throw const FileSystemException('临时文件不存在');
++    files.add(fileName);
++    return fileName;
++  }
++
++  @override
++  Future<void> delete(String fileName) async {
++    deletes++;
++    files.remove(fileName);
++  }
++}
++
++Map<String, Object> tables({String name = '白T', int count = 1}) => {
++      'schema': 2,
++      'app': 'my_wardrobe',
++      // exportedAt 每次都变，但不能影响指纹
++      'exportedAt': DateTime.now().toIso8601String(),
++      'clothes': [
++        for (var i = 0; i < count; i++) {'id': i + 1, 'name': name, 'price': 99.0},
++      ],
++      'outfits': <Object>[],
++    };
++
++List<ImageStamp> images({int extra = 0, int mtime = 1000}) => [
++      const ImageStamp('orig_1.jpg', 100, 1000),
++      const ImageStamp('thumb_1.png', 20, 1000),
++      for (var i = 0; i < extra; i++) ImageStamp('orig_${i + 2}.jpg', 50, mtime + i),
++    ];
++
++AutoBackup build({
++  required AutoBackupStore store,
++  required BackupTarget target,
++  Map<String, Object> Function()? data,
++  List<ImageStamp> Function()? imgs,
++  bool failWrite = false,
++  DateTime? now,
++}) {
++  final dir = Directory.systemTemp.createTempSync('t217_');
++  return AutoBackup(
++    store: store,
++    target: target,
++    readTables: () async => (data ?? tables)(),
++    readImages: () async => (imgs ?? images)(),
++    writeArchive: (out, t) async {
++      if (failWrite) throw const FileSystemException('没有空间');
++      out.writeAsStringSync('fake archive ${t.length}');
++    },
++    tempDir: () async => dir,
++    now: () => now ?? DateTime(2026, 11, 16, 3, 0),
++  );
++}
++
++void main() {
++  group('文件名格式', () {
++    test('gongzhuriji_yyyy-MM-dd_HHmm.wrdx', () {
++      expect(Backup.fileNameFor(DateTime(2026, 11, 16, 3, 0)), 'gongzhuriji_2026-11-16_0300.wrdx');
++      expect(Backup.fileNameFor(DateTime(2026, 1, 2, 23, 59)), 'gongzhuriji_2026-01-02_2359.wrdx');
++      expect(Backup.fileNameFor(DateTime(2026, 12, 31, 0, 5)), 'gongzhuriji_2026-12-31_0005.wrdx');
++    });
++
++    test('前缀/后缀与自动清理用的常量一致', () {
++      final name = Backup.fileNameFor(DateTime(2026, 11, 16, 3, 0));
++      expect(name.startsWith(Backup.autoBackupPrefix), isTrue);
++      expect(name.endsWith(Backup.autoBackupSuffix), isTrue);
++    });
++  });
++
++  group('数据指纹', () {
++    test('数据不变，两次指纹相同（exportedAt 变化不影响）', () {
++      final a = AutoBackup.fingerprint(tables(), images());
++      final b = AutoBackup.fingerprint(tables(), images());
++      expect(a, b);
++      expect(a.length, 64);
++    });
++
++    test('图片顺序不影响指纹', () {
++      final a = AutoBackup.fingerprint(tables(), images());
++      final b = AutoBackup.fingerprint(tables(), images().reversed.toList());
++      expect(a, b);
++    });
++
++    test('改一条数据后指纹不同', () {
++      final a = AutoBackup.fingerprint(tables(), images());
++      final b = AutoBackup.fingerprint(tables(name: '黑T'), images());
++      expect(a, isNot(b));
++      final c = AutoBackup.fingerprint(tables(count: 2), images());
++      expect(a, isNot(c));
++    });
++
++    test('增删一张图后指纹不同', () {
++      final base = AutoBackup.fingerprint(tables(), images());
++      final more = AutoBackup.fingerprint(tables(), images(extra: 1));
++      expect(base, isNot(more));
++      final fewer = AutoBackup.fingerprint(tables(), const [ImageStamp('orig_1.jpg', 100, 1000)]);
++      expect(base, isNot(fewer));
++    });
++
++    test('图片大小或修改时间变化后指纹不同', () {
++      final base = AutoBackup.fingerprint(tables(), images());
++      final bigger = AutoBackup.fingerprint(tables(), const [ImageStamp('orig_1.jpg', 101, 1000), ImageStamp('thumb_1.png', 20, 1000)]);
++      expect(base, isNot(bigger));
++      final touched = AutoBackup.fingerprint(tables(), const [ImageStamp('orig_1.jpg', 100, 1001), ImageStamp('thumb_1.png', 20, 1000)]);
++      expect(base, isNot(touched));
++    });
++  });
++
++  group('备份流程', () {
++    test('首次备份：写一个新文件并记下指纹', () async {
++      final store = MemoryAutoBackupStore();
++      final target = FakeTarget(['gongzhuriji_2026-11-15_0300.wrdx']);
++      final r = await build(store: store, target: target).run();
++      expect(r.ok, isTrue);
++      expect(r.skipped, isFalse);
++      expect(r.fileName, 'gongzhuriji_2026-11-16_0300.wrdx');
++      expect(target.files, ['gongzhuriji_2026-11-16_0300.wrdx']);
++      expect(target.deletes, 1); // 旧的那份被删
++      expect(store.hash, isNotEmpty);
++      expect(store.file, r.fileName);
++      expect(store.backupAt, DateTime(2026, 11, 16, 3, 0).millisecondsSinceEpoch);
++      expect(store.lastCheck, store.backupAt);
++    });
++
++    test('数据不变：跳过不写文件，只更新检查时间', () async {
++      final store = MemoryAutoBackupStore();
++      final target = FakeTarget();
++      final first = await build(store: store, target: target).run();
++      expect(first.skipped, isFalse);
++      store.lastCheck = 0;
++
++      final second = await build(store: store, target: target, now: DateTime(2026, 11, 17, 3, 0)).run();
++      expect(second.skipped, isTrue);
++      expect(second.ok, isTrue);
++      expect(target.puts, 1); // 没有第二次写入
++      expect(target.files, ['gongzhuriji_2026-11-16_0300.wrdx']);
++      expect(store.lastCheck, DateTime(2026, 11, 17, 3, 0).millisecondsSinceEpoch);
++      expect(store.backupAt, DateTime(2026, 11, 16, 3, 0).millisecondsSinceEpoch); // 备份时间不变
++      expect(store.hash, isNotEmpty);
++    });
++
++    test('数据有变化：写新文件、删旧文件、更新指纹', () async {
++      final store = MemoryAutoBackupStore();
++      final target = FakeTarget();
++      await build(store: store, target: target).run();
++      final oldHash = store.hash;
++
++      final data = tables(name: '黑T');
++      final r = await build(
++        store: store,
++        target: target,
++        data: () => data,
++        now: DateTime(2026, 11, 17, 3, 0),
++      ).run();
++      expect(r.skipped, isFalse);
++      expect(r.ok, isTrue);
++      expect(target.files, ['gongzhuriji_2026-11-17_0300.wrdx']);
++      expect(target.puts, 2);
++      expect(store.hash, isNot(oldHash));
++      expect(store.file, 'gongzhuriji_2026-11-17_0300.wrdx');
++    });
++
++    test('加一张图片算数据有变化', () async {
++      final store = MemoryAutoBackupStore();
++      final target = FakeTarget();
++      var imgs = images();
++      await build(store: store, target: target, imgs: () => imgs).run();
++      imgs = images(extra: 1);
++      final r = await build(store: store, target: target, imgs: () => imgs, now: DateTime(2026, 11, 17, 3, 0)).run();
++      expect(r.skipped, isFalse);
++      expect(target.puts, 2);
++    });
++
++    test('写文件失败：旧文件保留、指纹不变、报错', () async {
++      final store = MemoryAutoBackupStore();
++      final target = FakeTarget(['gongzhuriji_2026-11-15_0300.wrdx']);
++      final r = await build(store: store, target: target, failWrite: true).run();
++      expect(r.ok, isFalse);
++      expect(r.error, isNotNull);
++      expect(target.files, ['gongzhuriji_2026-11-15_0300.wrdx']);
++      expect(target.deletes, 0);
++      expect(store.hash, ''); // 指纹没更新
++      expect(store.backupAt, 0);
++      expect(store.error, isNotEmpty);
++    });
++
++    test('拷贝进公共目录失败：同样保留旧文件、不更新指纹', () async {
++      final store = MemoryAutoBackupStore(hash: 'old', backupAt: 1, file: 'gongzhuriji_2026-11-15_0300.wrdx');
++      final target = FakeTarget(['gongzhuriji_2026-11-15_0300.wrdx'])..failPut = true;
++      final r = await build(store: store, target: target, data: () => tables(name: '黑T')).run();
++      expect(r.ok, isFalse);
++      expect(target.files, ['gongzhuriji_2026-11-15_0300.wrdx']);
++      expect(store.hash, 'old');
++      expect(store.backupAt, 1);
++    });
++
++    test('只保留最新一份：目录里其它前缀的文件不动', () async {
++      final store = MemoryAutoBackupStore();
++      final target = FakeTarget(['gongzhuriji_2026-11-14_0300.wrdx', 'other.wrdx', 'gongzhuriji_2026-11-15_0300.wrdx']);
++      await build(store: store, target: target).run();
++      expect(target.files, ['other.wrdx', 'gongzhuriji_2026-11-16_0300.wrdx']);
++    });
++  });
++
++  group('打包格式', () {
++    test('writeArchive 产出 data.json + images/，文件名用新命名', () async {
++      final dir = Directory.systemTemp.createTempSync('t217_zip_');
++      ImageStore.root = p.join(dir.path, 'images');
++      Directory(ImageStore.root).createSync(recursive: true);
++      File(p.join(ImageStore.root, 'orig_1.jpg')).writeAsStringSync('fake-image');
++      final out = File(p.join(dir.path, Backup.fileNameFor(DateTime(2026, 11, 16, 3, 0))));
++      await Backup.writeArchive(out, tables());
++
++      expect(p.basename(out.path), 'gongzhuriji_2026-11-16_0300.wrdx');
++      final archive = ZipDecoder().decodeBytes(out.readAsBytesSync());
++      final names = archive.files.map((f) => f.name).toSet();
++      expect(names, contains('data.json'));
++      expect(names, contains('images/orig_1.jpg'));
++      final data = jsonDecode(utf8.decode(archive.findFile('data.json')!.content as List<int>));
++      expect(data['schema'], 2);
++      dir.deleteSync(recursive: true);
++    });
++  });
++
++  group('下一个 03:00 的延迟', () {
++    test('00:12 → 2h48m', () {
++      expect(AutoBackup.untilNextRun(DateTime(2026, 11, 16, 0, 12)), const Duration(hours: 2, minutes: 48));
++    });
++
++    test('03:00 整 → 24h', () {
++      expect(AutoBackup.untilNextRun(DateTime(2026, 11, 16, 3, 0)), const Duration(hours: 24));
++    });
++
++    test('23:59 → 3h01m', () {
++      expect(AutoBackup.untilNextRun(DateTime(2026, 11, 16, 23, 59)), const Duration(hours: 3, minutes: 1));
++    });
++
++    test('跨月/跨年也对', () {
++      expect(AutoBackup.untilNextRun(DateTime(2026, 12, 31, 23, 30)), const Duration(hours: 3, minutes: 30));
++      expect(AutoBackup.untilNextRun(DateTime(2026, 11, 30, 4, 0)), const Duration(hours: 23));
++    });
++  });
++
++  group('启动兜底', () {
++    final now = DateTime(2026, 11, 16, 12, 0);
++    test('从未检查过 → 要跑', () {
++      expect(AutoBackup.shouldRunOnLaunch(0, now), isTrue);
++    });
++    test('23 小时前 → 不跑', () {
++      expect(AutoBackup.shouldRunOnLaunch(now.subtract(const Duration(hours: 23)).millisecondsSinceEpoch, now), isFalse);
++    });
++    test('25 小时前 → 跑', () {
++      expect(AutoBackup.shouldRunOnLaunch(now.subtract(const Duration(hours: 25)).millisecondsSinceEpoch, now), isTrue);
++    });
++    test('正好 24 小时 → 跑', () {
++      expect(AutoBackup.shouldRunOnLaunch(now.subtract(const Duration(hours: 24)).millisecondsSinceEpoch, now), isTrue);
++    });
++  });
++}

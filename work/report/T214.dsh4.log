@@ -1,0 +1,133 @@
+=== waiting lock Sat Nov 14 15:54:38 UTC 2026 ===
+=== got lock Sat Nov 14 15:56:48 UTC 2026 ===
+=== try1 Sat Nov 14 15:56:48 UTC 2026 ===
+(node:2487) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+dsh: reasoning:
+Now read progress report last lines.
+
+我先按要求 echo 一下，然后读取任务文件和进度文件。
+dsh: PI_AI_ERROR: gateway_concurrency_limit: Concurrency limit exceeded for user, please retry later
+exit=1
+=== try2 Sat Nov 14 15:59:21 UTC 2026 ===
+(node:3099) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+I'll start by echoing BASH_OK and reading the task files.
+dsh: PI_AI_ERROR: gateway_concurrency_limit: Concurrency limit exceeded for user, please retry later
+exit=1
+=== try3 Sat Nov 14 16:02:16 UTC 2026 ===
+(node:3166) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+我会先 echo，再读取任务文件。
+dsh: PI_AI_ERROR: gateway_concurrency_limit: Concurrency limit exceeded for user, please retry later
+exit=1
+=== try4 Sat Nov 14 16:04:50 UTC 2026 ===
+(node:3233) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+dsh: PI_AI_ERROR: gateway_concurrency_limit: Concurrency limit exceeded for user, please retry later
+exit=1
+=== try5 Sat Nov 14 16:07:05 UTC 2026 ===
+(node:3300) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+我先 echo 确认环境，然后读取任务文件和进度报告。
+dsh: PI_AI_ERROR: gateway_concurrency_limit: Concurrency limit exceeded for user, please retry later
+exit=1
+=== try6 Sat Nov 14 16:09:33 UTC 2026 ===
+(node:3372) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+dsh: reasoning:
+Let me look at the files.
+
+dsh: reasoning:
+Now let's look at common.dart AppImage and root initialization.
+
+dsh: reasoning:
+No "root" in common.dart? Let's search for AppImage and LateInitializationError.
+
+dsh: reasoning:
+Fix 1: Matrix4.scale deprecated → use scaleByDouble or Matrix4.diagonal3Values. Deprecated Matrix4.scale in vector_math. The newer API: `Matrix4.diagonal3Values(s, s, 1)` or `..scaleByDouble(x,y,z,w)`? Actually Flutter 3.35+ deprecates Matrix4.scale(double) in favor of `scaleByDouble(double sx, double sy, double sz, double sw)`. Let me check the flutter version available. Easiest: `Matrix4.identity()..scaleByDouble(_doubleTapScale, _doubleTapScale, 1, 1)`. But is scaleByDouble available? Check vector_math version in SDK.
+
+Fix 2: collage_rotate_test.dart unused import `package:flutter/material.dart`? It uses Offset — which comes from material or dart:ui. Offset is exported by material. Hmm, info said unused import. Maybe flutter_test also exports? Actually flutter_test exports widgets? No. `package:flutter_test/flutter_test.dart` exports dart:ui? It exports `package:flutter/foundation.dart`? Let me just remove material import and import 'dart:ui' show Offset... but then Offset may be ambiguous? Simplest: remove material import and see analyze; if Offset unresolved, add `import 'dart:ui' show Offset;`.
+
+Fix 3: image preview tests. Give ImagePreviewPage optional imageBuilder parameter: `Widget Function(String rel)? imageBuilder` defaulting to AppImage. Then tests pass a builder. That's allowed by task ("可在测试里初始化或给 ImagePreviewPage 加可选 imageBuilder 参数").
+
+Then run analyze and test.
+
+Let's check flutter version and grep collage_page rotateDelta.
+
+dsh: reasoning:
+Also test uses `Offset` — painting.dart exports dart:ui Offset? painting.dart exports 'dart:ui' show Offset... yes painting.dart exports Offset. Fine.
+
+Now fix the test failure. Options: initialize ImageStore.root in test, or add optional imageBuilder param to ImagePreviewPage. Simplest and least invasive: in test, set ImageStore.root before pumpWidget. ImageStore.root is a public static late field, so test can set `ImageStore.root = Directory.systemTemp.path`. Need to import dart:io and lib/services/images.dart. But `late` field uninitialized → assigning is fine.
+
+However, task says "可在测试里初始化或给 ImagePreviewPage 加可选 imageBuilder 参数". Test-only init is cleaner, keeps AppImage logic untouched and no API change. But careful: the test in another file? Only this test fails. Let me set root in setUpAll with a temp dir. Actually Image.file on nonexistent path → errorBuilder → placeholder, still async. Fine.
+
+Let's do test init.
+
+dsh: reasoning:
+Now 28 issues vs baseline 27. The new one is the painting import unnecessary. So just remove the import entirely (flutter_test re-exports Offset? apparently yes, since painting import is unnecessary). Remove that import line.
+
+Wait but then Offset comes from flutter_test. Let's just remove the painting import.
+
+dsh: reasoning:
+Wait, but Offset — is it exported by flutter_test? Apparently yes. Then collage_rotate_test no longer has material; fine.
+
+Also the top comment in collage_rotate_test line 1. fine.
+
+Now re-run analyze.
+
+dsh: reasoning:
+27 issues — back to baseline. Let me verify the baseline file diff (T214-analyze-before.txt).
+
+dsh: reasoning:
+20 passed, only screens_test setUpAll fails due to fonts (known environment issue). 
+
+Now write summary and diff patch. Need git diff including new files via `git add -N`. Note task says don't git commit. `git add -N` is staging intent — acceptable per task ("用 git add -N 后再 diff"), but add only our files. Careful not to add assets/models/siglip2_vision.onnx etc.
+
+Let me verify diff excludes pubspec.lock.
+
+dsh: reasoning:
+Task said "git diff 加 git diff --no-index /dev/null 新文件" — but after `git add -N`, plain `git diff` already includes new files. I did git add -N and diff, which yields 10 files including new ones. Good. Note T214-diff.patch path is work/report/, relative from source/wardrobe-android is ../../work/report — verify that resolves to princess-diary/work/report. source/wardrobe-android → ../.. = princess-diary. Yes.
+
+Let me verify the new files appear in patch as new file mode.
+
+Now write summary. Also count lines per file.
+
+dsh: reasoning:
+Also append to progress file. Let me add a final line to progress.
+
+Also check analyze-before count to confirm 27.
+
+dsh: reasoning:
+Verify no diff to existing tests that were already there (screens_test, migrate_test) — git status showed they're untouched. Also confirm analyze issues are identical set, not just count. Let me diff the issue lists.
+
+T214 收尾完成（`echo BASH_OK` 已确认）。
+
+## 结论
+- **flutter analyze：27 条 info，与基线逐条比对完全一致，新增 0 条**
+- **flutter test：20 条通过、1 条失败**，唯一失败是 `screens_test.dart` 的 `setUpAll` 缺少 `/tmp/shot_fonts/NotoSansSC-Regular.otf` 字体（原有环境问题，按验收意见不处理）
+- `pubspec.lock` 不在 diff 里，未打包、未 commit、未碰 `batch_add_page.dart`
+
+## 1) 两条新增 info 已清
+- `lib/pages/image_preview_page.dart:95`：`Matrix4.identity()..scale(x)` → `..scaleByDouble(x, x, 1, 1)`，去掉 `deprecated_member_use`
+- `test/collage_rotate_test.dart`：删掉多余的 `package:flutter/material.dart`（`Offset` 由 `flutter_test` 转出），去掉 `unnecessary_import`
+
+## 2) 两条失败测试已修
+`test/image_preview_page_test.dart` 加 `setUpAll`，给 `ImageStore.root` 赋一个 `Directory.systemTemp` 临时目录，绕开 `LateInitializationError: Field 'root' has not been initialized`。**没改 AppImage 业务逻辑**，也不动 `image_preview_page.dart` 的构造签名（不需要 imageBuilder），路径不存在时仍走原 `errorBuilder` 占位。两条测试均通过。
+
+## 3) 命令与产物
+```
+export PATH=/workspace/tools/flutter/bin:$PATH PUB_HOSTED_URL=https://pub.flutter-io.cn \
+       NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
+flutter analyze  → work/report/T214-analyze-after.txt  # 27 issues found
+flutter test     → work/report/T214-test.txt           # +20 -1
+```
+
+## 4) 交付物
+- `work/report/T214-summary.md` — 结论先行，含改动文件与行数（10 文件、+433/−75）、三项改法、验收修复、测试结果、风险（真实百炼接口未联调、可选的第 2 项 widget 测试未做及原因）
+- `work/report/T214-diff.patch` — `git add -N` 后全量 diff，638 行 / 10 个文件，含全部 5 个新文件
+- `work/report/T214-progress.md` 已追加收尾记录
+
+唯一遗留：`screens_test` 缺字体，把 `NotoSansSC-Regular.otf` 放进 `/tmp/shot_fonts/` 即可跑通，与本次代码无关。
+exit=0

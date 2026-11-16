@@ -1,0 +1,638 @@
+diff --git a/source/wardrobe-android/lib/pages/collage_page.dart b/source/wardrobe-android/lib/pages/collage_page.dart
+index 78844db..f635e38 100644
+--- a/source/wardrobe-android/lib/pages/collage_page.dart
++++ b/source/wardrobe-android/lib/pages/collage_page.dart
+@@ -13,6 +13,17 @@ import '../widgets/common.dart';
+ import 'outfit_form_page.dart';
+ import 'select_pages.dart';
+ 
++/// 把「旋转后局部坐标系」里的位移换算回屏幕坐标系的位移。
++///
++/// GestureDetector 在 Transform.rotate 内部，[ScaleUpdateDetails.focalPointDelta] 是
++/// 旋转之后局部坐标下的位移，直接加到 e.x/e.y 上会导致：旋转 180° 时上下左右全反，
++/// 旋转 90° 时左右变上下。这里按 [rot] 正向旋转回去，得到屏幕上真实的拖动方向。
++Offset rotateDelta(Offset d, double rot) {
++  final c = math.cos(rot);
++  final s = math.sin(rot);
++  return Offset(d.dx * c - d.dy * s, d.dx * s + d.dy * c);
++}
++
+ class CollageResult {
+   final String cover, canvas;
+   final List<int> clothesIds;
+@@ -431,8 +442,10 @@ class _CollagePageState extends State<CollagePage> {
+             },
+             onScaleUpdate: (d) {
+               setState(() {
+-                e.x = (e.x + d.focalPointDelta.dx / size.width).clamp(0.0, 1.0);
+-                e.y = (e.y + d.focalPointDelta.dy / size.height).clamp(0.0, 1.0);
++                // 先用本次更新前的 e.rot 把局部位移换回屏幕坐标（双指旋转会在同一次回调里改 e.rot）。
++                final delta = rotateDelta(d.focalPointDelta, e.rot);
++                e.x = (e.x + delta.dx / size.width).clamp(0.0, 1.0);
++                e.y = (e.y + delta.dy / size.height).clamp(0.0, 1.0);
+                 if (d.pointerCount > 1) {
+                   e.scale = (_startScale * d.scale).clamp(0.2, 5.0);
+                   e.rot = _startRot + d.rotation;
+diff --git a/source/wardrobe-android/lib/pages/image_preview_page.dart b/source/wardrobe-android/lib/pages/image_preview_page.dart
+new file mode 100644
+index 0000000..cd15297
+--- /dev/null
++++ b/source/wardrobe-android/lib/pages/image_preview_page.dart
+@@ -0,0 +1,112 @@
++import 'package:flutter/material.dart';
++
++import '../widgets/common.dart';
++
++/// 黑底全屏图片预览：左右滑动切换同一搭配的所有图片，双指放大，双击在 1x/2.5x 之间切换。
++class ImagePreviewPage extends StatefulWidget {
++  final List<String> images;
++  final int initial;
++  const ImagePreviewPage({super.key, required this.images, this.initial = 0});
++
++  @override
++  State<ImagePreviewPage> createState() => _ImagePreviewPageState();
++}
++
++class _ImagePreviewPageState extends State<ImagePreviewPage> {
++  late final PageController _pc = PageController(initialPage: _safeInitial);
++  late int _index = _safeInitial;
++
++  int get _safeInitial => widget.images.isEmpty ? 0 : widget.initial.clamp(0, widget.images.length - 1);
++
++  @override
++  void dispose() {
++    _pc.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final total = widget.images.length;
++    return Scaffold(
++      backgroundColor: Colors.black,
++      body: Stack(children: [
++        Positioned.fill(
++          child: PageView.builder(
++            controller: _pc,
++            itemCount: total,
++            onPageChanged: (i) => setState(() => _index = i),
++            itemBuilder: (_, i) => _ZoomImage(rel: widget.images[i]),
++          ),
++        ),
++        // 顶部：当前/总数 + 关闭
++        Positioned(
++          left: 0,
++          right: 0,
++          top: 0,
++          child: SafeArea(
++            bottom: false,
++            child: Padding(
++              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
++              child: Row(children: [
++                IconButton(
++                  icon: const Icon(Icons.close, color: Colors.white),
++                  onPressed: () => Navigator.of(context).maybePop(),
++                ),
++                const Spacer(),
++                if (total > 0)
++                  Container(
++                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
++                    decoration: BoxDecoration(color: const Color(0x66000000), borderRadius: BorderRadius.circular(12)),
++                    child: Text('${_index + 1}/$total', style: const TextStyle(color: Colors.white, fontSize: 13)),
++                  ),
++                const SizedBox(width: 8),
++              ]),
++            ),
++          ),
++        ),
++      ]),
++    );
++  }
++}
++
++/// 单张图：InteractiveViewer 双指缩放，双击在 1x / 2.5x 切换。
++class _ZoomImage extends StatefulWidget {
++  final String rel;
++  const _ZoomImage({required this.rel});
++  @override
++  State<_ZoomImage> createState() => _ZoomImageState();
++}
++
++class _ZoomImageState extends State<_ZoomImage> {
++  final _tc = TransformationController();
++  static const _doubleTapScale = 2.5;
++
++  @override
++  void dispose() {
++    _tc.dispose();
++    super.dispose();
++  }
++
++  void _onDoubleTap() {
++    final s = _tc.value.getMaxScaleOnAxis();
++    if (s > 1.05) {
++      _tc.value = Matrix4.identity();
++    } else {
++      _tc.value = Matrix4.identity()..scaleByDouble(_doubleTapScale, _doubleTapScale, 1, 1);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return GestureDetector(
++      onDoubleTap: _onDoubleTap,
++      child: InteractiveViewer(
++        transformationController: _tc,
++        minScale: 1,
++        maxScale: 4,
++        clipBehavior: Clip.none,
++        child: Center(child: AppImage(widget.rel, fit: BoxFit.contain)),
++      ),
++    );
++  }
++}
+diff --git a/source/wardrobe-android/lib/pages/outfit_form_page.dart b/source/wardrobe-android/lib/pages/outfit_form_page.dart
+index f9dee44..839f7b1 100644
+--- a/source/wardrobe-android/lib/pages/outfit_form_page.dart
++++ b/source/wardrobe-android/lib/pages/outfit_form_page.dart
+@@ -11,6 +11,7 @@ import '../widgets/common.dart';
+ import '../widgets/pickers.dart';
+ import 'clothes_detail_page.dart';
+ import 'collage_page.dart';
++import 'image_preview_page.dart';
+ import 'select_pages.dart';
+ import 'tryon_page.dart';
+ 
+@@ -317,14 +318,19 @@ class _OutfitFormPageState extends State<OutfitFormPage> {
+           crossAxisSpacing: 10,
+           childAspectRatio: 0.75,
+           children: [
+-            for (final p in o.photos)
++            for (var i = 0; i < o.photos.length; i++)
+               Stack(children: [
+-                Positioned.fill(child: ClipRRect(borderRadius: BorderRadius.circular(12), child: AppImage(p, fit: BoxFit.cover))),
++                Positioned.fill(
++                  child: GestureDetector(
++                    onTap: () => push(context, ImagePreviewPage(images: List<String>.from(o.photos), initial: i)),
++                    child: ClipRRect(borderRadius: BorderRadius.circular(12), child: AppImage(o.photos[i], fit: BoxFit.cover)),
++                  ),
++                ),
+                 Positioned(
+                   right: 2,
+                   top: 2,
+                   child: GestureDetector(
+-                    onTap: () => setState(() => o.photos.remove(p)),
++                    onTap: () => setState(() => o.photos.removeAt(i)),
+                     child: const CircleAvatar(radius: 11, backgroundColor: Color(0x66000000), child: Icon(Icons.close, size: 14, color: Colors.white)),
+                   ),
+                 ),
+diff --git a/source/wardrobe-android/lib/pages/settings_page.dart b/source/wardrobe-android/lib/pages/settings_page.dart
+index d52e3f9..b0e535d 100644
+--- a/source/wardrobe-android/lib/pages/settings_page.dart
++++ b/source/wardrobe-android/lib/pages/settings_page.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:url_launcher/url_launcher.dart';
+ 
+ import '../services/settings.dart';
++import '../services/tryon.dart';
+ import '../widgets/common.dart';
+ import 'backup_page.dart';
+ 
+@@ -54,29 +55,22 @@ class _SettingsPageState extends State<SettingsPage> {
+           title: const Text('AI 试衣设置'),
+           content: SingleChildScrollView(
+             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+-              const Text('使用阿里云百炼「AI 试衣」接口，按张计费（新用户有免费额度）。需华北2（北京）地域的 API Key。', style: TextStyle(fontSize: 13, color: kGrayText, height: 1.5)),
++              const Text('使用阿里云百炼「千问图像编辑」模型生成试穿图，按张计费（标准版约 0.2 元/次）。需华北2（北京）地域的 API Key。', style: TextStyle(fontSize: 13, color: kGrayText, height: 1.5)),
+               const SizedBox(height: 10),
+               TextField(controller: ctl, decoration: const InputDecoration(labelText: 'DashScope API Key', hintText: 'sk-...')),
+               const SizedBox(height: 12),
+               const Text('模型', style: TextStyle(fontWeight: FontWeight.w600)),
+-              RadioListTile<String>(
+-                contentPadding: EdgeInsets.zero,
+-                value: 'aitryon',
+-                // ignore: deprecated_member_use
+-                groupValue: model,
+-                // ignore: deprecated_member_use
+-                onChanged: (v) => set(() => model = v!),
+-                title: const Text('aitryon（基础版，较快）'),
+-              ),
+-              RadioListTile<String>(
+-                contentPadding: EdgeInsets.zero,
+-                value: 'aitryon-plus',
+-                // ignore: deprecated_member_use
+-                groupValue: model,
+-                // ignore: deprecated_member_use
+-                onChanged: (v) => set(() => model = v!),
+-                title: const Text('aitryon-plus（效果更好）'),
+-              ),
++              for (final e in TryOn.models.entries)
++                RadioListTile<String>(
++                  contentPadding: EdgeInsets.zero,
++                  value: e.key,
++                  // ignore: deprecated_member_use
++                  groupValue: model,
++                  // ignore: deprecated_member_use
++                  onChanged: (v) => set(() => model = v!),
++                  title: Text(e.value),
++                  subtitle: Text(e.key, style: const TextStyle(fontSize: 11, color: kGrayText)),
++                ),
+               TextButton(
+                 onPressed: () => launchUrl(Uri.parse('https://bailian.console.aliyun.com/?apiKey=1'), mode: LaunchMode.externalApplication),
+                 child: const Text('去百炼控制台获取 API Key'),
+diff --git a/source/wardrobe-android/lib/services/settings.dart b/source/wardrobe-android/lib/services/settings.dart
+index f7ef381..2738b21 100644
+--- a/source/wardrobe-android/lib/services/settings.dart
++++ b/source/wardrobe-android/lib/services/settings.dart
+@@ -42,7 +42,19 @@ class Settings {
+   // AI 试衣（阿里云百炼）
+   static String get dashscopeKey => p.getString('dashscope_key') ?? '';
+   static set dashscopeKey(String v) => p.setString('dashscope_key', v.trim());
+-  static String get tryOnModel => p.getString('tryon_model') ?? 'aitryon';
++  /// 旧值迁移：aitryon-plus（效果更好）→ qwen-image-3.0-pro；aitryon 及其他未知值 → qwen-image-3.0。
++  static String get tryOnModel {
++    final v = p.getString('tryon_model');
++    switch (v) {
++      case 'qwen-image-3.0':
++      case 'qwen-image-3.0-pro':
++        return v!;
++      case 'aitryon-plus':
++        return 'qwen-image-3.0-pro';
++      default:
++        return 'qwen-image-3.0';
++    }
++  }
+   static set tryOnModel(String v) => p.setString('tryon_model', v);
+ 
+   // 备份
+diff --git a/source/wardrobe-android/lib/services/tryon.dart b/source/wardrobe-android/lib/services/tryon.dart
+index d40114b..386113d 100644
+--- a/source/wardrobe-android/lib/services/tryon.dart
++++ b/source/wardrobe-android/lib/services/tryon.dart
+@@ -1,3 +1,4 @@
++import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+ import 'dart:typed_data';
+@@ -5,30 +6,66 @@ import 'dart:typed_data';
+ import 'package:http/http.dart' as http;
+ import 'settings.dart';
+ 
+-/// 可选：阿里云百炼 AI 试衣（aitryon 0.2 元/张，aitryon-plus 0.5 元/张，各有 400 张免费额度）。
+-/// 必须用华北 2（北京）地域的 API Key。流程：本地图片 → 百炼临时存储(oss://) → 提交异步任务 → 轮询 → 下载结果。
+-/// 接口细节以百炼官方文档《AI试衣 API 参考》为准，接入时请核对一遍。
++/// 阿里云百炼「千问-图像编辑」（qwen-image-3.0 / qwen-image-3.0-pro）同步接口。
++///
++/// 历史：原 aitryon / aitryon-plus（AI 试衣）已被阿里下架（2026-11），改为多模态图像编辑模型。
++/// 价格：qwen-image-3.0 输入 0.02 元/张、输出 0.18 元/张（标准版一次约 0.2 元）；qwen-image-3.0-pro 更贵。
++/// 必须用华北 2（北京）地域的 API Key。
++///
++/// 流程：本地图片直接转 Base64（data:{mime};base64,...）→ POST 同步接口 → 从
++/// output.choices[0].message.content[] 里取第一个带 image 字段的 URL（24 小时有效）→ 立即下载成字节返回。
+ class TryOn {
+-  static const _base = 'https://dashscope.aliyuncs.com/api/v1';
++  static const _endpoint = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+ 
++  /// 可选模型：id → 中文名（设置页单选项）
++  static const models = {
++    'qwen-image-3.0': '标准版（较快、便宜）',
++    'qwen-image-3.0-pro': '高清版（细节更好、较慢）',
++  };
+ 
+-  /// 上传到百炼临时存储，返回 oss:// 地址（有效期 48 小时）
+-  static Future<String> _upload(File f, String key, String model) async {
+-    final pr = await http.get(Uri.parse('$_base/uploads?action=getPolicy&model=$model'), headers: {'Authorization': 'Bearer $key'});
+-    if (pr.statusCode != 200) throw HttpException('获取上传凭证失败 ${pr.statusCode}');
+-    final d = jsonDecode(pr.body)['data'];
+-    final name = '${DateTime.now().millisecondsSinceEpoch}_${f.uri.pathSegments.last}';
+-    final objectKey = '${d['upload_dir']}/$name';
+-    final req = http.MultipartRequest('POST', Uri.parse(d['upload_host']))
+-      ..fields.addAll({
+-        'OSSAccessKeyId': d['oss_access_key_id'], 'Signature': d['signature'], 'policy': d['policy'],
+-        'x-oss-object-acl': d['x_oss_object_acl'], 'x-oss-forbid-overwrite': d['x_oss_forbid_overwrite'],
+-        'key': objectKey, 'success_action_status': '200',
+-      })
+-      ..files.add(await http.MultipartFile.fromPath('file', f.path));
+-    final up = await req.send();
+-    if (up.statusCode != 200) throw HttpException('图片上传失败 ${up.statusCode}');
+-    return 'oss://$objectKey';
++  static const _negativePrompt = '改变人脸，改变发型，改变姿势，改变背景，多余的手指，畸形，模糊，低质量';
++
++  /// 按有几件衣服拼编辑指令。图1 固定是本人；上衣（连衣裙放上衣位）为图2；有下装则顺延。
++  static String prompt({required bool hasTop, required bool hasBottom}) {
++    final parts = <String>[];
++    var n = 2;
++    if (hasTop) {
++      parts.add('图${n++}中的上衣（如果是连衣裙就整件穿上）');
++    }
++    if (hasBottom) {
++      parts.add('图${n++}中的下装');
++    }
++    final head = parts.isEmpty ? '把图1人物的衣服换成参考图中的衣服' : '把图1人物的衣服换成${parts.join('和')}';
++    return '$head，严格保持图1人物的脸、发型、体型、姿势、背景和光线完全不变，只替换对应部位的衣服；'
++        '衣服的颜色、图案、材质、logo 和版型要和参考图一致，穿着自然贴身，真实照片质感。';
++  }
++
++  /// 读文件转 data URI；读不到就抛错。
++  static Future<String> _dataUri(File f) async {
++    final bytes = await f.readAsBytes();
++    final name = f.path.toLowerCase();
++    final mime = name.endsWith('.png') ? 'image/png' : (name.endsWith('.webp') ? 'image/webp' : 'image/jpeg');
++    return 'data:$mime;base64,${base64Encode(bytes)}';
++  }
++
++  /// 常见错误码翻成大白话
++  static String friendlyError(String? code, String? message) {
++    switch (code) {
++      case 'InvalidApiKey':
++        return 'API Key 不对（要用华北2 北京地域的 Key）';
++      case 'Arrearage':
++        return '账户欠费或额度已用完';
++      case 'DataInspectionFailed':
++        return '图片没过内容审核，换一张试试';
++      case 'Throttling':
++      case 'Throttling.RateQuota':
++        return '请求太频繁，稍后再试';
++      case 'AccessDenied':
++      case 'Model.AccessDenied':
++        return '这个 Key 没开通该模型';
++    }
++    final m = (message == null || message.trim().isEmpty) ? '未知错误' : message.trim();
++    return '生成失败：$m';
+   }
+ 
+   /// person: 本人正面全身照；top/bottom: 衣物图（连衣裙放 top，bottom 传 null）。返回结果图字节。
+@@ -36,36 +73,63 @@ class TryOn {
+     final key = Settings.dashscopeKey;
+     if (key.isEmpty) throw StateError('请先在「设置 > AI 试衣」里填写阿里云百炼 API Key');
+     final m = Settings.tryOnModel;
+-    onStep?.call('上传图片');
+-    final personUrl = await _upload(person, key, m);
+-    final topUrl = top == null ? null : await _upload(top, key, m);
+-    final bottomUrl = bottom == null ? null : await _upload(bottom, key, m);
+-    onStep?.call('提交任务');
+-    final sub = await http.post(Uri.parse('$_base/services/aigc/image2image/image-synthesis'),
+-        headers: {
+-          'Authorization': 'Bearer $key', 'Content-Type': 'application/json',
+-          'X-DashScope-Async': 'enable', 'X-DashScope-OssResourceResolve': 'enable',
+-        },
+-        body: jsonEncode({
+-          'model': m,
+-          'input': {'person_image_url': personUrl, if (topUrl != null) 'top_garment_url': topUrl, if (bottomUrl != null) 'bottom_garment_url': bottomUrl},
+-          'parameters': {'resolution': -1, 'restore_face': true},
+-        }));
+-    final sj = jsonDecode(utf8.decode(sub.bodyBytes));
+-    final taskId = sj['output']?['task_id'];
+-    if (taskId == null) throw HttpException('提交失败：${sj['message'] ?? sub.statusCode}');
+-    onStep?.call(m == 'aitryon-plus' ? '生成中（约 90 秒）' : '生成中（约 30 秒）');
+-    for (var i = 0; i < 80; i++) {
+-      await Future.delayed(const Duration(seconds: 4));
+-      final q = await http.get(Uri.parse('$_base/tasks/$taskId'), headers: {'Authorization': 'Bearer $key'});
+-      final out = jsonDecode(utf8.decode(q.bodyBytes))['output'];
+-      final st = out['task_status'];
+-      if (st == 'SUCCEEDED') {
+-        final img = await http.get(Uri.parse(out['image_url'])); // 链接 24 小时有效，立即下载
+-        return img.bodyBytes;
++    onStep?.call('准备图片');
++    final content = <Map<String, String>>[
++      {'image': await _dataUri(person)},
++      if (top != null) {'image': await _dataUri(top)},
++      if (bottom != null) {'image': await _dataUri(bottom)},
++      {'text': prompt(hasTop: top != null, hasBottom: bottom != null)},
++    ];
++    final body = jsonEncode({
++      'model': m,
++      'input': {
++        'messages': [
++          {'role': 'user', 'content': content},
++        ],
++      },
++      'parameters': {'n': 1, 'watermark': false, 'prompt_extend': false, 'negative_prompt': _negativePrompt},
++    });
++    onStep?.call(m == 'qwen-image-3.0-pro' ? '生成中（约 1 分钟）' : '生成中（约 30 秒）');
++
++    http.Response r;
++    try {
++      r = await http
++          .post(Uri.parse(_endpoint),
++              headers: {'Authorization': 'Bearer $key', 'Content-Type': 'application/json'},
++              body: utf8.encode(body))
++          .timeout(const Duration(minutes: 4));
++    } on TimeoutException {
++      throw const HttpException('生成超时，请检查网络后重试');
++    }
++
++    Map<String, dynamic> j = const {};
++    try {
++      j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
++    } catch (_) {
++      // 非 JSON 响应，下面按状态码处理
++    }
++    if (r.statusCode != 200) {
++      throw HttpException(friendlyError(j['code'] as String?, j['message'] as String?));
++    }
++
++    final content2 = (j['output']?['choices']?[0]?['message']?['content']) as List?;
++    String? url;
++    for (final c in content2 ?? const []) {
++      if (c is Map && c['image'] is String && (c['image'] as String).isNotEmpty) {
++        url = c['image'] as String;
++        break;
+       }
+-      if (st == 'FAILED' || st == 'CANCELED') throw HttpException('生成失败：${out['message'] ?? st}');
+     }
+-    throw const HttpException('生成超时，请稍后在百炼控制台查看');
++    if (url == null) throw HttpException(friendlyError(j['code'] as String?, j['message'] as String? ?? '返回里没有图片'));
++
++    onStep?.call('下载结果');
++    http.Response img;
++    try {
++      img = await http.get(Uri.parse(url)).timeout(const Duration(minutes: 1));
++    } on TimeoutException {
++      throw const HttpException('生成超时，请检查网络后重试');
++    }
++    if (img.statusCode != 200) throw HttpException('下载结果失败 ${img.statusCode}');
++    return img.bodyBytes;
+   }
+ }
+diff --git a/source/wardrobe-android/test/collage_rotate_test.dart b/source/wardrobe-android/test/collage_rotate_test.dart
+new file mode 100644
+index 0000000..02bbc06
+--- /dev/null
++++ b/source/wardrobe-android/test/collage_rotate_test.dart
+@@ -0,0 +1,44 @@
++import 'dart:math' as math;
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:my_wardrobe/pages/collage_page.dart';
++
++/// 拼图元素旋转后拖动方向的换算。
++/// (10,0) 是「旋转后局部坐标」里的位移，rotateDelta 要把它换回屏幕坐标：
++/// 屏幕位移 = R(rot) * 局部位移，即 sx = dx·cos(rot) - dy·sin(rot)、sy = dx·sin(rot) + dy·cos(rot)。
++void main() {
++  const d = Offset(10, 0);
++  const eps = 1e-6;
++
++  void expectOffset(Offset a, Offset b) {
++    expect((a.dx - b.dx).abs(), lessThan(eps), reason: 'dx ${a.dx} vs ${b.dx}');
++    expect((a.dy - b.dy).abs(), lessThan(eps), reason: 'dy ${a.dy} vs ${b.dy}');
++  }
++
++  test('rot = 0：方向不变', () {
++    expectOffset(rotateDelta(d, 0), const Offset(10, 0));
++  });
++
++  test('rot = π/2：局部向右 = 屏幕向下', () {
++    expectOffset(rotateDelta(d, math.pi / 2), const Offset(0, 10));
++  });
++
++  test('rot = π：左右上下全反', () {
++    expectOffset(rotateDelta(d, math.pi), const Offset(-10, 0));
++  });
++
++  test('rot = 2π 等价于 0', () {
++    expectOffset(rotateDelta(d, 2 * math.pi), const Offset(10, 0));
++  });
++
++  test('rot = -π/2：局部向右 = 屏幕向上', () {
++    expectOffset(rotateDelta(d, -math.pi / 2), const Offset(0, -10));
++  });
++
++  test('任意角度长度不变', () {
++    for (final r in [0.3, 1.1, -2.2, 3.0]) {
++      final o = rotateDelta(const Offset(3, -4), r);
++      expect((o.distance - 5).abs(), lessThan(eps));
++    }
++  });
++}
+diff --git a/source/wardrobe-android/test/image_preview_page_test.dart b/source/wardrobe-android/test/image_preview_page_test.dart
+new file mode 100644
+index 0000000..0bace87
+--- /dev/null
++++ b/source/wardrobe-android/test/image_preview_page_test.dart
+@@ -0,0 +1,41 @@
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:my_wardrobe/pages/image_preview_page.dart';
++import 'package:my_wardrobe/services/images.dart';
++
++void main() {
++  // AppImage 通过 ImageStore.abs() 拼绝对路径，测试环境没有调用过 init()，
++  // 先给 root 一个临时目录，让 AppImage 走 errorBuilder 显示占位（不改业务逻辑）。
++  setUpAll(() {
++    ImageStore.root = Directory.systemTemp.createTempSync('t214_images_').path;
++  });
++
++  testWidgets('ImagePreviewPage 显示 2/3，滑动后显示 3/3', (tester) async {
++    // 图片路径不存在，AppImage 会显示占位，不影响计数。
++    await tester.pumpWidget(const MaterialApp(
++      home: ImagePreviewPage(images: ['no/such/a.jpg', 'no/such/b.jpg', 'no/such/c.jpg'], initial: 1),
++    ));
++    await tester.pumpAndSettle();
++
++    expect(find.text('2/3'), findsOneWidget);
++
++    // 向左滑动切到下一张
++    await tester.fling(find.byType(PageView), const Offset(-400, 0), 1000);
++    await tester.pumpAndSettle();
++
++    expect(find.text('3/3'), findsOneWidget);
++    expect(find.text('2/3'), findsNothing);
++  });
++
++  testWidgets('初始为第 1 张显示 1/3，关闭按钮存在', (tester) async {
++    await tester.pumpWidget(const MaterialApp(
++      home: ImagePreviewPage(images: ['no/such/a.jpg', 'no/such/b.jpg', 'no/such/c.jpg']),
++    ));
++    await tester.pumpAndSettle();
++    expect(find.text('1/3'), findsOneWidget);
++    expect(find.byIcon(Icons.close), findsOneWidget);
++    expect(find.byType(InteractiveViewer), findsWidgets);
++  });
++}
+diff --git a/source/wardrobe-android/test/tryon_prompt_test.dart b/source/wardrobe-android/test/tryon_prompt_test.dart
+new file mode 100644
+index 0000000..4a54a3f
+--- /dev/null
++++ b/source/wardrobe-android/test/tryon_prompt_test.dart
+@@ -0,0 +1,37 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:my_wardrobe/services/tryon.dart';
++
++void main() {
++  group('TryOn.prompt 指令里图号', () {
++    test('只有上衣：图2 是上衣', () {
++      final p = TryOn.prompt(hasTop: true, hasBottom: false);
++      expect(p, contains('图2中的上衣'));
++      expect(p, isNot(contains('下装')));
++      expect(p, isNot(contains('图3')));
++    });
++
++    test('只有下装：图2 是下装', () {
++      final p = TryOn.prompt(hasTop: false, hasBottom: true);
++      expect(p, contains('图2中的下装'));
++      expect(p, isNot(contains('图3')));
++      expect(p, isNot(contains('上衣')));
++    });
++
++    test('上下都有：图2 上衣、图3 下装', () {
++      final p = TryOn.prompt(hasTop: true, hasBottom: true);
++      expect(p, contains('图2中的上衣'));
++      expect(p, contains('图3中的下装'));
++    });
++
++    test('连衣裙提示与固定尾巴都在', () {
++      final p = TryOn.prompt(hasTop: true, hasBottom: true);
++      expect(p, contains('如果是连衣裙就整件穿上'));
++      expect(p, contains('严格保持图1人物的脸、发型、体型、姿势、背景和光线完全不变'));
++      expect(p, contains('真实照片质感'));
++    });
++  });
++
++  test('模型列表只有千问图像编辑两档', () {
++    expect(TryOn.models.keys, ['qwen-image-3.0', 'qwen-image-3.0-pro']);
++  });
++}
+diff --git a/source/wardrobe-android/test/tryon_settings_test.dart b/source/wardrobe-android/test/tryon_settings_test.dart
+new file mode 100644
+index 0000000..fc4b423
+--- /dev/null
++++ b/source/wardrobe-android/test/tryon_settings_test.dart
+@@ -0,0 +1,35 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:my_wardrobe/services/settings.dart';
++import 'package:shared_preferences/shared_preferences.dart';
++
++/// 旧值 → 新模型的迁移。原 aitryon / aitryon-plus 已下架（2026-11）。
++Future<String> _modelWith(Map<String, Object> seed) async {
++  SharedPreferences.setMockInitialValues(seed);
++  await Settings.init();
++  return Settings.tryOnModel;
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  test('旧值 aitryon → qwen-image-3.0', () async {
++    expect(await _modelWith({'tryon_model': 'aitryon'}), 'qwen-image-3.0');
++  });
++
++  test('旧值 aitryon-plus → qwen-image-3.0-pro', () async {
++    expect(await _modelWith({'tryon_model': 'aitryon-plus'}), 'qwen-image-3.0-pro');
++  });
++
++  test('空值（首次启动）→ qwen-image-3.0', () async {
++    expect(await _modelWith({}), 'qwen-image-3.0');
++  });
++
++  test('未知值 → qwen-image-3.0', () async {
++    expect(await _modelWith({'tryon_model': 'some-other-model'}), 'qwen-image-3.0');
++  });
++
++  test('已经是新值则原样返回', () async {
++    expect(await _modelWith({'tryon_model': 'qwen-image-3.0'}), 'qwen-image-3.0');
++    expect(await _modelWith({'tryon_model': 'qwen-image-3.0-pro'}), 'qwen-image-3.0-pro');
++  });
++}

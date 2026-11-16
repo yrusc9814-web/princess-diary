@@ -7,7 +7,7 @@
 ## 1. 项目是什么
 - 用 **Flutter** 重写安卓 App「z衣橱 1.2.10」（原包名 com.ai.wardrobe，AI 衣橱管理）。原 APK 是 Flutter AOT + 混淆，**无法还原源码**，所以是照功能和界面重写。
 - 现名「**公主日记**」，**纯本地自用**，无后端、无登录。
-- 当前已交付版本：**2.1.3（versionCode 6）**，`apk/公主日记_2.1.3_arm64.apk`
+- 当前已交付版本：**2.1.4（versionCode 7）**，`apk/公主日记_2.1.4_arm64.apk`（下一版 2.1.5+8）
   - 大小 226,510,105 bytes，SHA-256 `eaaa15b3fbb3c4f635d9a3950b60d546a76e2b0097e8f871f25d4e85f5d65cd4`
 - **下一个版本必须用 2.1.4+7**（versionCode 只能递增）。
 
@@ -43,6 +43,7 @@
 | 2.1.1 | 4 | 换图标，改名「公主日记」 |
 | 2.1.2 | 5 | 单品页标题「我的单品」 |
 | 2.1.3 | 6 | 淘宝新版商品页扫描修复（web_import_page.dart）；「我的」页改名+公主头像 |
+| 2.1.4 | 7 | AI 试衣改百炼 qwen-image-3.0/pro；穿搭照点开预览；拼图旋转后拖动修复；单品裁剪双指缩放；拼图照片「裁剪」；每天凌晨 3 点自动备份（Documents/公主日记备份，只留最新一份）；备份文件改名 gongzhuriji_日期.wrdx。沙盒构建 |
 | **2.1.4** | **7** | **下一个，待做（见第 5 节）** |
 
 详细进度日志：`source/wardrobe-android/docs/REWRITE_PROGRESS.md`。
@@ -83,5 +84,5 @@
 - `notes/`：原 APK 分析（apk-analysis.md、rea-analysis.md）、后端接口路径、原版全部中文文案、界面规格 ui-screenshots.md、最终方案 final-plan.md。
 - `work/`：主题预览、图标脚本、扫描测试报告、批量导入改前备份。
 - `history/聊天记录.md`：全部对话原文（按日期）；`history/daily_logs/`：每日工作摘要；`history/PROJECT_BRIEF.md`：原 Agent 的项目备忘。
-- `apk/`：最新 2.1.3 安装包。
+- `apk/`：最新 2.1.4 安装包。
 - `original/uploads/`：用户上传的全部原始素材——原版 z衣橱 1.2.10 APK、用户最初的重写源码 zip、原版界面截图和录屏（mp4）、粉色主题样图（ChatGPT 图像 *.webp 是正式 5 张；“甜美/粉色…”7 张是用户说发错的那批）、图标图。

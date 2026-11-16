@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -8,6 +10,7 @@ import 'pages/home_page.dart';
 import 'pages/mine_page.dart';
 import 'pages/outfits_page.dart';
 import 'pages/wardrobe_page.dart';
+import 'services/auto_backup.dart';
 import 'services/images.dart';
 import 'services/settings.dart';
 import 'widgets/common.dart';
@@ -17,6 +20,9 @@ Future<void> main() async {
   await Settings.init();
   await ImageStore.init();
   await AppDb.I.open();
+  // 自动备份：注册每日 03:00 的周期任务，并按需补跑一次（失败不影响启动，不阻塞首屏）
+  unawaited(AutoBackupService.syncSchedule().catchError((Object e) => debugPrint('schedule auto backup failed: $e')));
+  unawaited(AutoBackupService.maybeRunOnLaunch());
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: Colors.transparent, statusBarIconBrightness: Brightness.dark, systemNavigationBarColor: Colors.white, systemNavigationBarIconBrightness: Brightness.dark));
   runApp(const WardrobeApp());
 }

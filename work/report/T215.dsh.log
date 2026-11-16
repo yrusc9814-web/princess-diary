@@ -1,0 +1,747 @@
+=== waiting lock Sat Nov 14 16:12:59 UTC 2026 ===
+=== got lock Sat Nov 14 16:16:29 UTC 2026 ===
+=== try1 Sat Nov 14 16:16:29 UTC 2026 ===
+(node:4773) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+dsh: reasoning:
+Let me explore the repo state.
+
+dsh: reasoning:
+No lib/utils dir. Need to create it. Let me read image_edit_page.dart.
+
+dsh: reasoning:
+Now let me look at test files and check baseline. Let me set up environment and run flutter analyze baseline first (in background) while I write files.
+
+Let me first create the progress report file and start baseline analyze.
+
+Actually the task says baseline is 27 info and current state is still 27. So I need to run analyze before (baseline) — but T214-analyze-before exists for T214. For T215 I need T215-analyze-after.txt compared with baseline 27. Let me run analyze now (before my changes) to get a baseline for my own comparison, then after changes.
+
+Let me start that in the background.
+
+dsh: reasoning:
+Baseline confirmed: 27 issues. Save baseline? Task says store T215-analyze-after.txt and compare with baseline 27 info. Let me also write baseline file quickly (optional). Let's record the analyze output after changes. Let me save baseline as reference maybe not needed.
+
+Now write crop_math.dart pure functions.
+
+Design:
+```dart
+import 'dart:ui';
+
+/// 以 0~1 归一化坐标把裁剪框按 scale 等比缩放（中心为 focal01），再按 pan01 平移，最后夹回 [0,1]。
+Rect scaleCrop(Rect base, double scale, Offset focal01, Offset pan01, {double minSize = 0.08}) {
+  ...
+}
+Rect panCrop(Rect c, Offset d01) {...}
+```
+
+Semantics: base = rect at gesture start (0~1). scale relative to base. focal01 = focal point in 0~1 coords (of image rect) at gesture start? Task says "以开始时的框为基准，按 d.scale 等比缩放（宽高同乘 scale），缩放中心为双指焦点（换算到 0~1 坐标）；同时跟随 focalPointDelta 平移". So scaleCrop(base, scale, focal01, pan01):
+- w = clamp(base.width*scale, minSize, 1.0), h likewise.
+- Keep focal point fixed relative: newLeft = focal01.dx - (focal01.dx - base.left) * scale, similarly top. That way scaling about focal.
+- Then add pan01.
+- Then pan into bounds: clamp left to [0, 1-w], top to [0, 1-h].
+- Rect.fromLTWH(left, top, w, h).
+
+Note ordering: clamp width/height first, then translate into boundary — as required (no squashing).
+
+Tests specified:
+- scale=1 unchanged: scaleCrop(base, 1, focal, Offset.zero) == base. With scale=1, left = focal.dx - (focal.dx-base.left)*1 = base.left ✓.
+- scale=2 以中心放大并夹在 [0,1]: e.g., base = Rect.fromLTRB(0.25,0.25,0.75,0.75), focal=center(0.5,0.5), scale 2 → w=1.0,h=1.0 → left=0.5-(0.25)*2=0.0, top=0.0 → Rect(0,0,1,1) ✓ 夹在 [0,1].
+- scale=0.1 不小于 0.08: base width 1.0 → 0.1 clamped to 0.08.
+- 焦点在左上角时缩小，左上角不动: base = Rect(0.2,0.2,0.8,0.8) (w=0.6), focal=(0.2,0.2), scale=0.5 → newW=0.3, left=0.2-(0.0*0.5)=0.2, top=0.2 → topLeft unchanged ✓. Then pan clamp: left in [0,0.7] ok.
+- 平移越界被夹回且尺寸不变: panCrop(Rect(0.2,0.2,0.8,0.8), Offset(10,10)) → Rect(0.2... wait: clamp left to [0, 1-0.6]=[0,0.4] → 0.4; top 0.4; size unchanged 0.6x0.6 ✓.
+
+Also panCrop(c, d01) used for 1-finger pan and for the combined pan in scale.
+
+Now for image_edit_page:
+
+Replace `_cropOverlay(Rect r)` internals:
+- Add state fields: `Rect cropBase = ...` and maybe gesture start focal in 0..1.
+- The gesture layer: Positioned.fromRect(rect: rect, child: GestureDetector(onScaleStart, onScaleUpdate, child: ...)) spanning the whole image area, with border painted? Border must stay at crop rect. Approach: keep the crop border as a separate widget at cr (Positioned.fromRect with IgnorePointer border decoration), and the gesture layer as full-rect transparent GestureDetector placed BELOW the handles but ABOVE shade.
+
+Order in Stack (later = on top):
+1. shade (IgnorePointer) — Positioned.fill
+2. full-image GestureDetector (scale layer) — Positioned.fromRect(rect: r)
+3. crop border (IgnorePointer, Positioned.fromRect(rect: cr))
+4. handles (top)
+
+Wait the shade is Positioned.fill and paints a hole at cr — it's IgnorePointer so it doesn't consume gestures. Fine.
+
+Important: handles must be above the scale layer so they get the gesture first. In Flutter Stack hit testing goes topmost-first, so putting handles after the scale layer works.
+
+Gesture handling:
+```dart
+Rect _base = Rect.zero;
+Offset _focalStart = Offset.zero; // in 0..1 of image
+void onScaleStart(ScaleStartDetails d) {
+  _base = crop;
+  _focalStart = Offset((d.localFocalPoint.dx / r.width), ...)  // hmm
+}
+```
+Task: "缩放中心为双指焦点（换算到 0~1 坐标）" — use the focal point at start? or current? The scaleCrop signature takes focal01 and pan01. Simplest: use current focal point normalized as focal, plus pan01 = focalPointDelta normalized. Actually typical implementation: focal (current) fixed while scaling → newLeft = focal - (focal - base.left)*scale. But that's not "scale about start focal". Requirement 1: "以开始时的框为基准，按 d.scale 等比缩放（宽高同乘 scale），缩放中心为双指焦点（换算到 0~1 坐标）；同时跟随 focalPointDelta 平移". Ambiguous, either works. Test for focal top-left: "焦点在左上角时缩小，左上角不动" — that's testing scaleCrop directly, not the widget. So either choice passes tests.
+
+I'll use current focal point: focal01 = d.localFocalPoint normalized by r size, pan01 = d.focalPointDelta normalized. Then newRect = scaleCrop(base, d.scale, focal01, pan01). Hmm but with current focal point moving, and also applying pan delta, there could be double-counting: if focal moves by delta, the focal-based scaling already accounts for focal movement, plus adding pan delta manually would double. Careful: scaleCrop = scale about focal + pan. If focal is current (already includes movement), adding full focalPointDelta double counts movement. Better: use start focal (recorded at scale start) and add the cumulative pan (focal point current - start focal). That's clean and matches "以开始时的框为基准": 
+
+onScaleStart: `_cropBase = crop; _focalStart = normalized(localFocalPoint)`.
+onScaleUpdate: 
+  focalNow01 = normalized(d.localFocalPoint);
+  pan01 = focalNow01 - _focalStart;
+  crop = scaleCrop(_cropBase, d.scale, _focalStart, pan01);
+
+Hmm, but with scale about start focal and panning to follow the current focal, the crop follows fingers. Good. For 1 finger: scale==1, focalStart = finger pos at start, pan01 = cumulative movement → translates by focalPointDelta cumulative — equivalent to old all:true behavior. ✓ Task says for 1 finger: "按 focalPointDelta 平移整框". Equivalent.
+
+Actually maybe simpler and more faithful: use panCrop for the incremental approach? No: "每次 onScaleStart 记录基准框，scale 相对基准算，避免累积误差" — the base-relative approach is what's asked.
+
+Alternative: use current focal with scale about current focal and NO explicit pan: then crop = scaleCrop(base, scale, focalNow, Offset.zero). That gives natural pinch behavior where the point under fingers stays put... roughly. Test-cases for crop_math unaffected. I'll go with start focal + cumulative pan, since it explicitly matches "同时跟随 focalPointDelta 平移".
+
+Hmm, but wait: with startFocal fixed and pan01 = current-start, and scale about startFocal: total = scale about start focal then translated by focal movement. The point of the crop at startFocal maps to startFocal + pan = current focal. So the content point that was under the start focal is under the current focal. That's exactly desired pinch-to-zoom-pan behavior. 
+
+Now clamping in scaleCrop:
+```dart
+Rect scaleCrop(Rect base, double scale, Offset focal01, Offset pan01, {double minSize = 0.08}) {
+  final w = (base.width * scale).clamp(minSize, 1.0);
+  final h = (base.height * scale).clamp(minSize, 1.0);
+  var left = focal01.dx - (focal01.dx - base.left) * scale + pan01.dx;
+  var top = focal01.dy - (focal01.dy - base.top) * scale + pan01.dy;
+  left = left.clamp(0.0, 1.0 - w);
+  top = top.clamp(0.0, 1.0 - h);
+  return Rect.fromLTWH(left, top, w, h);
+}
+```
+Note when scale clamps to minSize, the anchor formula uses raw scale — slight inconsistency but fine; better to use effective scale per axis? Keep simple but ensure predictable test outcomes. Test "scale=0.1 不小于 0.08": base width maybe 0.9, scale 0.1 → 0.09 ≥ 0.08, no clamp. Let's design test with base width 1.0 → 0.1 > 0.08 also no clamp. Use base = Rect.fromLTRB(0,0,1,1), scale 0.1 → width 0.1 → not clamped. Hmm need a test that actually clamps: base width 1.0 scale 0.05 → 0.05 → clamp 0.08. I'll write test asserting width >= 0.08 for scale 0.001 e.g. base 1.0, scale 0.001 → 0.001 → clamped to 0.08, and check no squash (still within [0,1]).
+
+Actually to be safe, use effective scale for anchoring so that width clamp and left stay consistent? If w clamped bigger than base.width*scale, anchoring with raw scale puts left ok anyway (clamped). Fine. But cleaner: compute anchor using per-axis effective ratio: dl = (focal.dx - base.left) * (w / base.width). Then left = focal.dx - dl + pan.dx. With scale=1, w=base.width → left unchanged ✓. This handles clamping consistently. And test "焦点在左上角时缩小，左上角不动": focal = base.topLeft → dl=0 → left = base.left ✓ (with pan 0). Good. I'll use per-axis ratio, with guard for base.width == 0.
+
+panCrop:
+```dart
+Rect panCrop(Rect c, Offset d01) {
+  final left = (c.left + d01.dx).clamp(0.0, 1.0 - c.width);
+  final top = (c.top + d01.dy).clamp(0.0, 1.0 - c.height);
+  return Rect.fromLTWH(left, top, c.width, c.height);
+}
+```
+Careful: if c.width > 1 (shouldn't happen), clamp bounds invalid (upper < lower) → clamp throws. Dart's num.clamp requires lowerLimit <= upperLimit. Guard: use `final maxX = math.max(0.0, 1.0 - c.width)`. Let's add safety via a helper.
+
+Now for the widget's handle drag: keep `move(...)` for handles as is (edge-based), that's unchanged. But the `move` function is inside _cropOverlay; keep.
+
+Now also must ensure handle drag in crop mode still works while scale gesture layer is below. Also need GestureDetector's onScaleUpdate in the full-rect layer; but the 4 handles' GestureDetectors (onPanUpdate) are on top → they win.
+
+Imp
+
+ 
+dsh: PI_AI_ERROR: gateway_concurrency_limit: Concurrency limit exceeded for user, please retry later
+exit=1
+=== try2 Sat Nov 14 16:24:02 UTC 2026 ===
+(node:5246) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+dsh: reasoning:
+Let me look at the repo structure and the target file.
+
+dsh: reasoning:
+Let me plan. Baseline analyze already exists (T215-analyze-before.txt). Let me check it, and check flutter availability.
+
+Then write crop_math.dart, test, modify image_edit_page.
+
+Let me start with baseline check and writing utils file in parallel.
+
+dsh: reasoning:
+Let me write crop_math.dart first, then tests, then integrate.
+
+Design:
+
+```dart
+Rect scaleCrop(Rect base, double scale, Offset focal01, Offset pan01, {double minSize = 0.08}) 
+```
+
+Semantics: new size = base.size * scale, clamped so w in [minSize, 1.0], h in [minSize, 1.0]. Focal point fixed: the point within base at relative position? Standard: crop rect position such that the image point under focal stays under focal after scaling. In normalized coordinates: left' = focal.dx - (focal.dx - base.left) * sx where sx = newW/base.width. If base.width is 0 avoid. Then pan01 applied. Then clamp: first clamp sizes, then translate into bounds: if left<0 left=0; if left>1-w left=1-w. Similarly top.
+
+Note "缩放中心为双指焦点（换算到 0~1 坐标）". After scale+pan, clamp. Actually order: scale about focal, then pan. Then clamp translate.
+
+Careful with scale > 1 when newW = min(base.width*scale, 1.0). Then sx = newW/base.width, possibly < scale if clamped to 1. That's fine (keeps aspect equal for both dims? Using independent sx and sy may distort aspect). User says 宽高同乘 scale. If clamping at 1.0 for width but height still under 1, independent clamp → distortion. Better: compute s = scale, then clamp s so that base.width*s <= 1 and base.height*s <= 1 and >= minSize: s_clamped = min(scale, 1/base.width, 1/base.height) and max with minSize/max(base.width, base.height)? Hmm to keep aspect ratio, use a single scale factor clamped:
+s = scale.clamp(minScale, maxScale) where maxScale = min(1/base.w, 1/base.h), minScale = minSize/max(base.w, base.h)? But then when base.w < minSize (possible via handles? handles enforce >=0.08), use min. Simpler: single scale factor preserves 比例. Requirement: "先把宽高夹到 [0.08, 1.0]" — means each dimension clamped independently, but "不要因越界把框压扁变形". Independent clamping could distort when one dimension hits bound. To be safe preserve aspect: compute k = scale, limit k to [kw_min, kw_max] where kw_max = min(1/w, 1/h), kw_min = max(minSize/w... no: to ensure both >= minSize, k >= minSize/w and k >= minSize/h → k >= minSize/min(w,h). Using max? If w=0.5,h=0.2, minSize/w=0.16, minSize/h=0.4 → k>=0.4 ensures h>=0.08 and w>=0.2. So k_min = minSize/min(w,h). k_max = min(1/w,1/h)=1/max(w,h). Good.
+
+Then newW = w*k, newH = h*k. This satisfies test "scale=0.1 不小于 0.08" (with base 0.4x0.4 → k_min=0.2, so size 0.08). And "scale=2 以中心放大并夹在 [0,1]": base 0.5 centered → k clamped to 1/0.5=2 → size 1.0. Good.
+
+If floor > ceil edge cases (base width > 1?) clamp base first. I'll handle degenerate via clamping k_min<=k_max otherwise take midpoint.
+
+Position: focal relative: left' = focal.dx - (focal.dx - base.left)*k, then + pan.dx. clamp left into [0, 1-newW].
+
+Test "焦点在左上角时缩小，左上角不动": focal (0,0), base from (0,0,0.5,0.5), scale 0.5 → left'=0-(0-0)*0.5=0. Good; and smaller.
+
+panCrop(Rect c, Offset d01): translate, clamp within bounds keeping size.
+
+Implement:
+
+```dart
+Rect panCrop(Rect c, Offset d01) {
+  final w = c.width.clamp(0.0,1.0); ...
+}
+```
+Better: size clamped to [0,1] then position clamp.
+
+Now integration in _cropOverlay:
+
+Add state fields: `Rect? _cropBase;` for scale base. Use GestureDetector on entire rect area with onScaleStart/Update, placed below handles but above shade. Order in Stack children: shade (ignore pointer) → gesture layer sized rect (transparent) → border paint (IgnorePointer with Container border) → handles. So handles above gesture layer get priority.
+
+Actually border previously was part of GestureDetector container; now separate IgnorePointer Positioned.fromRect with border.
+
+onScaleStart: `_cropBase = crop;` if pointerCount==1, also base for pan.
+onScaleUpdate: 
+```dart
+final base = _cropBase ?? crop;
+if (d.pointerCount <= 1) {
+  setState(() => crop = panCrop(base, Offset(d.focalPointDelta.dx / r.width, d.focalPointDelta.dy / r.height)));
+} else {
+  final focal01 = Offset(((d.localFocalPoint.dx) / r.width).clamp(0.0,1.0), ...);
+  setState(() => crop = scaleCrop(base, d.scale, focal01, Offset(d.focalPointDelta.dx/r.width, d.focalPointDelta.dy/r.height)));
+}
+```
+But `_cropBase` for single finger panning: pan from base each update would only apply delta from base and lose previous movement. Need accumulate: for single pointer, update crop each frame from current crop: `crop = panCrop(crop, delta01)`; and update _cropBase = crop too? For two finger, base stays fixed at start (good, avoids accumulation). But if pointer count changes mid-gesture (second finger added), scale resets? onScaleStart is called again when pointer count changes? In Flutter, ScaleGestureRecognizer calls onScaleStart when gesture starts (first pointer down) and onScaleEnd when last up; onScaleUpdate has pointerCount changes but scale continues. Hmm, when second finger added, scale is relative to initial span computed at start? Flutter's scale only tracks pointers that were down at... Actually ScaleGestureRecognizer handles additional pointers, _initialSpan updated when pointer count changes? It calls onScaleStart again? Looking at Flutter: `_reconfigure` when pointer count changes calls `_dispatchOnStartCallbackIfNeeded()`? In ScaleGestureRecognizer, adding a pointer triggers `_reconfigure` which sets `_initialSpan = _currentSpan` and calls onScaleStart again? Let me recall: `_reconfigure` does `_initialSpan = _currentSpan; ... if (_state == _ScaleState.started) { if (onScaleEnd != null) invokeCallback('onScaleEnd'); _state = _ScaleState.accepted; }` So it ends and restarts, thus onScaleStart called again when pointer count changes. Yes — in Flutter, adding/removing a finger triggers onScaleEnd then onScaleStart. So scale resets, base re-recorded. Good — so onScaleStart always records base = crop.
+
+For single pointer, using base + focalPointDelta per update: since focalPointDelta is incremental, pan from base would repeatedly move only delta from base. Better for pointerCount==1 use current crop and incremental delta. That's consistent with base update? If second finger goes down, onScaleStart re-records. So:
+
+```dart
+if (d.pointerCount <= 1) {
+  setState(() => crop = panCrop(crop, Offset(dx, dy)));
+} else {
+  setState(() => crop = scaleCrop(base, d.scale, focal01, Offset(dx,dy)));
+}
+```
+Two-finger: base fixed, focalPointDelta is incremental per update, so pan accumulates correctly relative to base? scaleCrop computes from base with focal and adds only delta of this frame — that loses accumulated pan across frames. Need accumulated pan: track `_panStart`/accumulate. Use `_panAccum += delta01` each update while two fingers, then scaleCrop(base, d.scale, focal01, _panAccum). Focal point also moves during pan; focal01 should be current local focal. But using current focal with base scaling each frame yields shift effect... For pinch center it's ok-ish; spec: "以开始时的框为基准，按 d.scale 等比缩放... 缩放中心为双指焦点（换算到 0~1）；同时跟随 focalPointDelta 平移". So compute scale from base about current focal plus accumulated pan. Fine.
+
+Add fields `Rect? _cropBase; Offset _cropPan = Offset.zero;`. onScaleStart resets both.
+
+Widget test optional; task says optional. Tests in crop_math_test.dart required. Let me also add a widget test? Optional, skip to reduce risk, maybe add simple one? Focus on required pure-function tests; widget test with TestGesture on real page needs file loading and image decode—complex. Skip and note.
+
+Also check test dir has flutter_test dep. Yes.
+
+Now write files.
+
+Also must check `flutter analyze` includes test file—new file must not add info. Avoid unused imports.
+
+Write crop_math.dart with docs.
+
+Careful `clamp` returns double? On doubles ok.
+
+Also math import maybe not needed if using clamp. Avoid unused import.
+
+Let me write.
+
+dsh: reasoning:
+Check package name is wardrobe. Let me check pubspec name. Also run the test now.
+
+Wait, potential issue in scaleCrop: minK computed but then nw/nh clamped independently could distort aspect if w*k < minSize while h*k >= minSize. But k>=minK ensures w*k>=minSize (since minK=minSize/min(w,h)). So both satisfied. maxK ensures max dimension <=1. But then clamp to 1.0 for each could break aspect only if one exceeds 1 — maxK prevents that. Fine. However minSize clamp could exceed 1 if minSize>1, edge case ignore.
+
+Also `1 / (w > h ? w : h)` could be Infinity if w=h=0, but we already guard w,h>0. Good.
+
+Now test.
+
+dsh: reasoning:
+Package name is my_wardrobe. Fix import.
+
+dsh: reasoning:
+Now edit image_edit_page.dart `_cropOverlay`. Need:
+- full image rect gesture layer with onScaleStart/onScaleUpdate
+- 1 finger: pan by focalPointDelta
+- 2 fingers: scale relative to base with focal, plus pan
+- handles on top
+
+Design: `_cropOverlay(Rect r)` returns list. Add fields `Rect? _cropBase;` maybe also track start focal. onScaleStart: _cropBase = crop; (and maybe _scaleStartFocal not needed).
+
+onScaleUpdate: 
+```
+final base = _cropBase ?? crop;
+final d01 = Offset(d.focalPointDelta.dx / r.width, d.focalPointDelta.dy / r.height);
+Rect next;
+if (d.pointerCount >= 2) {
+  final focal01 = Offset(((d.localFocalPoint.dx) / r.width).clamp(0.0,1.0), ...);
+  next = scaleCrop(base, d.scale, focal01, d01);
+} else {
+  next = panCrop(crop, d01);
+}
+setState(() => crop = next);
+```
+Wait requirement says 2 fingers "以开始时的框为基准，按 d.scale 等比缩放...同时跟随 focalPointDelta 平移". But pan per-update with base scaling each update means pan is applied once per update rather than accumulated from base. scaleCrop applies pan01 on top of base each frame — if we pass base every update with only this frame's delta, then pan gets lost (each frame resets to base + delta, no accumulation). Hmm. Actually if we pass base = start rect and pan = delta only, panning accumulates nothing. But requirement explicitly says use base and d.scale relative to base to avoid accumulation error. To handle pan properly with base, we need accumulated pan since start: track start focal point, compute pan from start? But then scaling focal also matters.
+
+Simplest robust approach: maintain two things:
+- `_cropBase` = rect at start
+- for 2-finger: compute from base with total scale d.scale, and total pan = (current focal - start focal) in 01 coordinates. Since base is the start rect, using total pan from start gives correct accumulated translation.
+
+Use onScaleStart record `_cropBase = crop; _cropFocalStart = d.localFocalPoint;`. Then in update for pointerCount>=2:
+```
+final panTotal = Offset((d.localFocalPoint.dx - _cropFocalStart.dx)/r.width, ...);
+scaleCrop(_cropBase!, d.scale, focal01, panTotal)
+```
+That satisfies "以开始时的框为基准" and "跟随 focalPointDelta 平移" (total delta). Good.
+
+For 1 finger: panCrop(crop, focalPointDelta per update) — matches original all:true. But there's an edge: if user puts down 2nd finger mid-gesture, scale jumps. onScaleUpdate is continuous; scale resets to 1 at start. Non-issue mostly, but a common pattern: on pointerCount change, re-baseline. Keep simple: when d.pointerCount changes to >=2 first time, rebaseline. Let's add `_cropPointerCount` and rebase when increasing to multi. Actually simpler and nicer: if pointerCount >= 2 and previous <2, set base = crop and focal start = current focal, scale offset? d.scale would not be 1 at that moment. Hmm, that causes jump. To avoid complexity, we can handle by tracking a scale baseline `_cropScaleBase`: on transition set _cropBase = crop, _cropFocalStart = focal, _cropScaleRef = d.scale; then use d.scale/_cropScaleRef. That's robust and still "scale 相对基准算". Let's do that.
+
+Fields:
+```
+Rect? _cropBase;
+Offset _cropFocalStart = Offset.zero;
+double _cropScaleRef = 1;
+int _cropPointers = 0;
+```
+
+onScaleStart:
+```
+_cropBase = crop; _cropFocalStart = d.localFocalPoint; _cropScaleRef = 1; _cropPointers = d.pointerCount;
+```
+onScaleUpdate:
+```
+final multi = d.pointerCount >= 2;
+if (multi && _cropPointers < 2) {
+  _cropBase = crop; _cropFocalStart = d.localFocalPoint; _cropScaleRef = d.scale == 0 ? 1 : d.scale;
+}
+_cropPointers = d.pointerCount;
+if (!multi) {
+  final d01 = Offset(d.focalPointDelta.dx / r.width, d.focalPointDelta.dy / r.height);
+  setState(() => crop = panCrop(crop, d01));
+  _cropBase = crop;  // hmm for later rebase we set anyway
+  return;
+}
+final base = _cropBase ?? crop;
+final focal01 = Offset(((d.localFocalPoint.dx) / r.width).clamp(0.0, 1.0), ((d.localFocalPoint.dy) / r.height).clamp(0.0, 1.0));
+final pan01 = Offset((d.localFocalPoint.dx - _cropFocalStart.dx)/r.width, (d.localFocalPoint.dy - _cropFocalStart.dy)/r.height);
+final sc = _cropScaleRef == 0 ? 1.0 : d.scale / _cropScaleRef;
+setState(() => crop = scaleCrop(base, sc, focal01, pan01));
+```
+Careful: comparing double equality for _cropScaleRef==0 fine.
+
+Note focal01 clamping to [0,1]: if focal outside the rect (finger outside image area, since gesture layer covers rect only, so focal within rect). Fine. But in tests? no.
+
+Also potential issue: assigning fields without setState is fine.
+
+Handles: they are in a Stack after the gesture layer, so hit-test order: Stack children later painted on top and hit-tested first. So handles win. Good.
+
+Gesture layer should be `Positioned.fromRect(rect: r, child: GestureDetector(behavior: HitTestBehavior.opaque?, onScaleStart..., child: ...))`. Need the white border inside. Border drawn on the crop rect — must stay at cr. Put border as separate IgnorePointer positioned at cr so gesture layer covers full image.
+
+Current border was inside the crop-box GestureDetector. Now border should still be drawn at cr: use `Positioned.fromRect(rect: cr, child: IgnorePointer(child: Container(decoration: border)))`. Put it after the gesture layer so it paints above; it's ignore pointer so handles still fine.
+
+Order in Stack: shade (ignore), gesture layer full rect, border (ignore), handles.
+
+GestureDetector with behavior opaque to catch gestures anywhere in image rect (default child is SizedBox covering area, but Container without color still hit test? use behavior: HitTestBehavior.opaque).
+
+One concern: onScaleUpdate with 1 finger conflicts with vertical scroll? no scrolling.
+
+Also note: onPanUpdate replaced → onScaleStart/Update. scale gesture with one pointer fires onScaleUpdate with pointerCount 1. focalPointDelta available.
+
+Now, `d.scale` for single pointer is 1. Good.
+
+Let's implement. Also import crop_math.
+
+Edge: when mode enters crop, stale base fields—reset in onScaleStart each time.
+
+Write edits.
+
+dsh: reasoning:
+Now replace _cropOverlay. Design:
+
+```dart
+  List<Widget> _cropOverlay(Rect r) {
+    final cr = Rect.fromLTRB(...);
+    void move(Offset d, {bool l..., all...}) { ... }  // keep for handles
+```
+
+Keep handle move logic. Replace inner pan GestureDetector with full-image-positioned GestureDetector.
+
+Note stack position: rect positioned widget plus overlay. The full region GestureDetector should be positioned at rect (positioned.fromRect) below handles, above shade? Order in stack: shade (IgnorePointer), full-area gesture layer (with border painted on cr), then handles. Border must be drawn at cr, white 2px. Since the gesture layer covers the whole rect, its Container border would be on r, not cr. So use a CustomPaint / IgnorePointer overlay for the border at cr above the gesture layer, or inside the gesture layer stack. Simpler: full-area GestureDetector child: IgnorePointer? No: child must not block. Use:
+
+Positioned.fromRect(rect: r, child: GestureDetector(
+  behavior: HitTestBehavior.opaque,
+  onScaleStart..., onScaleUpdate..., onScaleEnd...,
+  child: Stack(children:[ Positioned.fromRect(rect: cr offset by -r.topLeft, child: IgnorePointer(child: Container(border...))) ])
+))
+
+But cr is in stack coordinates; relative to r: Rect.fromLTRB(cr.left-r.left, ...). Compute local.
+
+onScaleUpdate per spec: one finger → pan by focalPointDelta with panCrop(crop, delta01). Two fingers: relative to base: scale = d.scale (Flutter's scale relative to gesture start; on pointer count change, Flutter doesn't reset scale automatically... actually Flutter's ScaleGestureRecognizer resets initial span when pointer count changes? In ScaleGestureRecognizer, _initialSpan is updated when pointer count changes via _reconfigure, and scale resets to 1? Let me recall: `_reconfigure` sets _initialSpan = _currentSpan, and _scaleFactor = 1.0? In Flutter's scale.dart, on pointer add/remove, `_reconfigure` is called which resets _initialSpan and _initialFocalPoint, and `_scaleFactor`... There's `_scaleFactor = 1.0` reset? Code: 
+
+```dart
+void _reconfigure(int pointer) {
+  _initialFocalPoint = _currentFocalPoint;
+  _initialSpan = _currentSpan;
+  _initialLine = _currentLine;
+  _initialHorizontalSpan = _currentHorizontalSpan;
+  _initialVerticalSpan = _currentVerticalSpan;
+  if (_state == _ScaleState.started) {
+    if (onEnd != null) invokeCallback('onEnd', () => onEnd!(ScaleEndDetails(...)));
+    _state = _ScaleState.accepted;
+  }
+  ...
+}
+```
+Hmm, it invokes onEnd and re-starts on next update? Actually it sets state accepted then _advanceStateMachine starts again with new initial values, so scale restarts at 1. So scale is relative to pointer-count change. So I should re-record base when pointer count changes. That's exactly what my fields are for: on update, if d.pointerCount != _cropPointers, re-record base = crop, scaleRef = d.scale (usually 1), focalStart = d.focalPoint.
+
+But careful: for 2-finger, spec says use base = box at gesture start (when 2 fingers start). We record base on pointer-count change to 2. Then relative scale = d.scale / _cropScaleRef... if d.scale resets to 1 at reconfigure, scaleRef would be 1. But reconfigure happens before update; d.scale at the update after count change may be ~1. Safer: use effective scale = d.scale / _cropScaleRef and record _cropScaleRef = d.scale at count change (the observed value at the first update after change). Hmm, if reconfigure resets to 1, first update d.scale = something like 1.0 exactly? Actually _scaleFactor = _currentSpan/_initialSpan, where initialSpan reset at reconfigure, current span in same event maybe equals; so ~1. Fine either way.
+
+Focal in 0..1 coords relative to r: (d.localFocalPoint.dx / r.width).clamp(0,1).
+
+For 2-finger: newCrop = scaleCrop(base, scale/_cropScaleRef, focalAtBase? , pan01). The focal for zoom center: use focal point at gesture start of 2-finger (_cropFocalStart01) as the zoom center (spec: 缩放中心为双指焦点换算到 0~1). Using start focal is stable and matches "以开始时的框为基准". Use start focal as focal01, and pan01 = cumulative delta from start focal? Spec: "同时跟随 focalPointDelta 平移". If I use focal01 = start focal and pan = (currentFocal - startFocal)/size, that follows the focal movement cumulatively. That's cleaner than accumulating deltas with base. Note task says follow focalPointDelta; with base-relative recomputation, cumulative focal delta is the correct equivalent. But also for the "同时跟随 focalPointDelta 平移" I could pass d.focalPointDelta on top — that would accumulate only per-frame which requires mutating crop; but since base is fixed, must use cumulative. Use cumulative.
+
+1 finger: use panCrop(crop, d.focalPointDelta / size) — incremental on current crop, no deformation, clamped.
+
+Also onScaleStart: record base = crop, focalStart, pointers = d.pointerCount, scaleRef = 1.
+
+Handle case pointerCount >= 2 (use 2 if exactly 2; for >2 also treat like 2 with base). Keep simple: if pointerCount >= 2 use scale path.
+
+Also onScaleEnd reset _cropBase = null.
+
+Let's write the code.
+
+Also border: white border on cr remains.
+
+Test widget optional — I might add a widget test to be safe? Task says optional. Time budget: analyze + full tests required. Maybe add widget test with two TestGesture to pinch; could be flaky. Skip, but maybe valuable. Let me first implement and run analyze/tests.
+
+Implementation code:
+
+```dart
+  List<Widget> _cropOverlay(Rect r) {
+    final cr = ...;
+    void move(...) {...}
+
+    // 整图手势层：1 指平移、2 指以基准框等比缩放（框可小到放不下两指）
+    void start(ScaleStartDetails d) {
+      _cropBase = crop;
+      _cropPointers = d.pointerCount;
+      _cropFocalStart = Offset(((d.localFocalPoint.dx) / r.width).clamp(0.0, 1.0), ((d.localFocalPoint.dy) / r.height).clamp(0.0, 1.0));
+      _cropScaleRef = 1;
+      _cropPanStart = Offset.zero;
+    }
+```
+
+Need pan start field too. Add `Offset _cropPanStart = Offset.zero;` — I declared _cropFocalStart, _cropScaleRef, _cropPointers, _cropBase. Need to store focal start pixel to compute pan. Store focalStart in normalized only might lose pixel delta but normalized delta = (cur-start)/size, that's fine, same. I'll compute pan01 = Offset((cur.dx - _cropFocalStartPx.dx)/r.width, ...). So store pixels. But for zoom center need normalized. I can store pixel and convert. Let's store `_cropFocalPx` and convert where needed. Use fields: `_cropFocalPx = Offset.zero`.
+
+I declared _cropFocalStart (Offset) — repurpose as pixel focal. Fine, rename semantics in comment.
+
+Update:
+
+```dart
+    void update(ScaleUpdateDetails d) {
+      final base = _cropBase ?? crop;
+      if (d.pointerCount != _cropPointers) {
+        _cropPointers = d.pointerCount;
+        _cropBase = crop;
+        _cropFocalStart = d.localFocalPoint;
+        _cropScaleRef = d.scale == 0 ? 1 : d.scale;
+        if (d.pointerCount < 2) {
+          // 回到单指：接着平移
+        }
+        return; // 本帧只记录基准
+      }
+      final f01 = Offset((_cropFocalStart.dx / r.width).clamp(0.0, 1.0), (_cropFocalStart.dy / r.height).clamp(0.0, 1.0));
+      final pan01 = Offset((d.localFocalPoint.dx - _cropFocalStart.dx) / r.width, (d.localFocalPoint.dy - _cropFocalStart.dy) / r.height);
+      if (d.pointerCount >= 2) {
+        final s = _cropScaleRef == 0 ? d.scale : d.scale / _cropScaleRef;
+        setState(() => crop = scaleCrop(base, s, f01, pan01));
+      } else {
+        final f = d.focalPointDelta;
+        setState(() => crop = panCrop(crop, Offset(f.dx / r.width, f.dy / r.height)));
+      }
+    }
+```
+
+Wait for single finger after pointer-count change return, we skip one frame — acceptable.
+
+Hmm on returning to 1 finger, we set base but use incremental pan; fine.
+
+onScaleEnd: _cropBase = null; _cropPointers = 0.
+
+One concern: when 2-finger base recorded on count change, focal start should be focal at that moment; we use d.localFocalPoint; and scaleRef = d.scale at that update. Since reconfigure resets d.scale to 1, scaleRef = 1. Good.
+
+Widget structure:
+
+```dart
+    return [
+      Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _CropShade(cr)))),
+      Positioned.fromRect(
+        rect: r,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onScaleStart: start,
+          onScaleUpdate: update,
+          onScaleEnd: (_) { _cropBase = null; _cropPointers = 0; },
+          child: Stack(children: [
+            Positioned.fromRect(
+              rect: Rect.fromLTRB(cr.left - r.left, cr.top - r.top, cr.right - r.left, cr.bottom - r.top),
+              child: IgnorePointer(child: Container(decoration: BoxDecoration(border: Border.all(color: Colors.white, width: 2)))),
+            ),
+          ]),
+        ),
+      ),
+      ...handles
+    ];
+```
+
+Handles are positioned in stack coordinates (at = cr.topLeft absolute) - they're siblings in the outer Stack, so absolute coordinates fine.
+
+But note: GestureDetector onScale will also compete with handle pan gestures. Handles are later children → on top → they win hit test. In Flutter, hit testing goes topmost first; if handle's gesture detector accepts... both are in arena; handle's pan gesture vs parent's scale gesture. The scale recognizer will accept when movement occurs; pan also. Arena: first to accept wins — DragGestureRecognizer accepts after slop; ScaleGestureRecognizer also accepts after slop. Hmm, with a single pointer both compete. Typically child wins because... actually in arena, both are candidates; on pointer move past slop, both may declare victory; the one that calls resolve first wins. Drag and Scale both use same drag slop logic; order depends on registration order — the child's recognizer is added first (hit test order: topmost first, so child added to arena before ancestors?). Gesture arena entries are added during hit test in order of hit test path, child first. When multiple accept in same pass, first accepted wins. Flutter's scale vs pan: ScaleGestureRecognizer also declares victory in `_advanceStateMachine` when span changes or drag slop exceeded. Existing code with handle inside? Previously handles were siblings above the box detector, and the box detector covered only cr. With a pan-only detector overlap, the handle is a child... wait previously handles were siblings, not children, of the box GestureDetector. Handle was later in stack → top. Same as now. Since previously it worked (assumed), now the ancestor-ish sibling scale layer is below the handle in the Stack, so hit test enters handle first; its PanGestureRecognizer enters arena first → likely wins. Good.
+
+However one risk: ScaleGestureRecognizer on the full-area layer will also see handle drags? No, it's a separate region below; pointer hits handle box which is above; the hit test path includes the handle's detector, and... does the stack's gesture layer get hit too? Positioned.fromRect layers don't contain each other, so hit test returns only the topmost child that absorbs. Stack hit tests children in reverse order and stops at first hit that returns true. Handle container with GestureDetector returns true. So the scale layer isn't hit. Good.
+
+Let me write the edit.
+
+dsh: reasoning:
+Wait: the `move` function's `all` param is now unused → analyzer might flag unused parameter? Dart doesn't warn on unused optional named parameters of local functions... Actually unused_element / unused_local_variable might. `all` is a parameter, no warning. But cleaner: keep for handles (all unused). Let me simplify: remove `all` branch since only handles use move now. But `c` variable handling. I'll rewrite move to only handle edges (handles). That avoids dead code.
+
+Also pointer count branch: when pointer count changes 2→1, we return without panning that frame — acceptable.
+
+Note `onScaleUpdate` uses d.pointerCount which counts pointers in the gesture. Good.
+
+One concern: `scaleCrop` clamps k by maxK = 1/max(w,h) so at base 0.9 wide, scale=1.05 gives k limited → crop won't exceed 1. Fine.
+
+But per spec: "先把宽高夹到 [0.08, 1.0]" — done via k clamp and final clamp.
+
+Also DPR: `_cropScaleRef` when starting with 2 fingers: onScaleStart with pointerCount=1 typically then second finger added; my pointerCount change branch sets ref = d.scale (=1 at that moment). Good.
+
+Now clean up `move`.
+
+dsh: reasoning:
+27 issues, same as baseline. Let me verify diff of issue lists to ensure no new info (could be swap).
+
+dsh: reasoning:
+Only line shift of the pre-existing info, still 27 total, no new warnings/errors/info. Good.
+
+Now run full test suite.
+
+dsh: reasoning:
+26 passed 1 failed (screens_test setUpAll, font issue). Baseline was 20 pass 1 fail; now 26 pass because T214 added tests + my 6. Good.
+
+Now let me also add an optional widget test for pinch? Task says optional. I'd like one to prove two-finger pinch shrinks. But it requires constructing ImageEditPage with a real image file, which may be heavy. Given "可选" and time, maybe skip. But a widget test would strengthen verification. Risk: flaky/heavy. Let me consider a smaller approach: test the overlay behavior is hard without page. Skip optional; instead verify logic via pure tests.
+
+Actually let me check the file compiles well and check padding visual. Let me view the crop overlay region for sanity.
+
+Also concern: `_cropScaleRef` division when scale==0 initially. In update, s = d.scale / _cropScaleRef when _cropScaleRef != 0; initial _cropScaleRef=1 so s=d.scale. Good.
+
+One issue: with 1 finger, d.focalPointDelta exists in ScaleUpdateDetails — yes.
+
+Another: pointerCount change branch returns without updating crop; on first update after second finger down, pointerCount becomes 2 and we set base=crop. Fine.
+
+Edge: `scaleCrop` maxK uses max dimension: base width 0.5 => maxK=2, so scale 8 clamps to 2 giving width 1. Good.
+
+Let me double check test "scale=2 以中心放大" expects width 0.8: base 0.4, k min(2, 1/0.4=2.5) → 0.8. Center: left = 0.5 - (0.2)*2 = 0.1 → right 0.9, center 0.5. Good.
+
+Now also handle: when crop touches boundary and user scales down with focal at edge, pan clamp may keep it. Fine.
+
+Run analyze already passed. Now generate diff patch including new files. `git diff` won't include untracked new files. Need to add them via `git diff --no-index /dev/null file` or `git add -N` (intent to add) — that changes index though, not commit. Safer: use git diff --no-index for new files and concatenate. But `git add -N` would show in `git status` as added; task says no commit/push, staging intent might be undesirable but acceptable? Avoid touching index. Use `git diff --no-index` appending.
+
+Let's create patch.
+
+dsh: reasoning:
+The tracked diff includes T214 files. Redline says don't touch T214 files — the deliverable diff should only contain my changes. Task says diff = `git diff -- source/wardrobe-android/lib source/wardrobe-android/test` 加新文件. But that would include T214's changes which I mustn't touch. Better: restrict diff to my files only, and note it. I'll generate diff for image_edit_page.dart only + new files.
+
+Let me generate a patch: git diff -- image_edit_page.dart, plus new-file diffs via git diff --no-index /dev/null file.
+
+Also check my change to image_edit_page doesn't accidentally include T214 edits — image_edit_page was unmodified before (not in git status list before), so diff is purely mine. Good.
+
+Let me produce T215-diff.patch.
+
+dsh: reasoning:
+ 
+
+dsh: reasoning:
+Patch is good. Note crop_math.dart line 46 `final left = focal01.dx - (focal01.dx - base.left) * (nw / w) + pan01.dx;` — that's fine. But there's a bug: `if (!k.isFinite) k = 1;` after clamping — if scale is NaN, comparisons false, k stays NaN, then isFinite false → 1. Fine.
+
+One concern: `nw.clamp(minSize,1.0)` if minSize > 1... not an issue.
+
+Another: scaleCrop with NaN scale → k=1 good.
+
+Now widget test optional — task says optional. I have time; a widget test for pinch would add robustness, but it risks flakiness. Let me consider: the task explicitly says optional. Given constraint "少推理多执行" and deliverable, I could add a widget test verifying pinch shrinks the box. But it requires pumping ImageEditPage with a file path, decode image etc. That's heavier. Let me skip? The acceptance might value it. Hmm, but risk of breaking test suite. Actually I could write a widget test that pumps just the overlay? _cropOverlay is private. Testing ImageEditPage requires a file; I could create a temp PNG and pump with autoCutout false, then tap 裁剪, then two-finger gesture. Flutter Image.memory decode in tests works with a real PNG. Let's attempt quickly — if it fails in 10 min, drop it.
+
+Actually a simpler and robust alternative: verify pan and pinch behavior through the pure functions (done). Task says widget test optional. But hmm — "断言框变小" needs access to crop; would need to check the rendered border rect size via find.byType or the CustomPaint _CropShade. Could use tester.widget<CustomPaint> shade painter... private class but we can inspect canvas? Alternative: measure the Container with white border via tester.getSize on the Positioned border child. Hmm, find by decoration.
+
+Better: use find.byType(Container) matching decoration border white 2 — fragile.
+
+Alternative: check Shade painter via CustomPaint painter runtime type name '_CropShade' and its `r` field via dynamic. Ugly but works: `final p = tester.widgetList<CustomPaint>(find.byType(CustomPaint))`... 
+
+I'll try the straightforward approach: pump, tap '裁剪', then two TestGesture down at two points inside rect, moveApart → should shrink (pinch in = move together... moving apart = zoom in). To shrink, move fingers closer (pinch in). Then read the shade rect via dynamic.
+
+Time cost is real. The task says optional; I'll skip the widget test but note in summary why (纯函数已覆盖几何，widget 层需要私有状态断言). Hmm, but a reviewer (Hark) may check "写 widget 测试可选" — optional so fine.
+
+Actually, let me reconsider: A widget test adds significant value verifying the gesture wiring actually works (a real risk: ScaleGestureRecognizer competing with parent scroll? No scroll here). Risk: my wiring might not work at all in practice and pure tests wouldn't catch it. That's a strong reason to write the widget test — it's the only check that the overlay actually responds. Let me attempt it with a bounded effort.
+
+I need to construct an ImageEditPage with an actual image file. In widget test, File IO works (dart:io available in flutter test VM). Create temp PNG via package:image encodeImage Image(width:100,height:100). Then pumpWidget(MaterialApp(home: ImageEditPage(path: p))), pumpAndSettle... _load uses compute() which in tests runs... compute spawns isolate; in flutter_test, compute works but might be tricky (it does work, using isolates). Decoding via decodeImageFromList requires real async; pumpAndSettle should handle.
+
+Then tap 裁剪 tool: find.text('裁剪') — appears in bottom tool and title after. Use find.byIcon(Icons.crop).
+
+Then find the overlay's GestureDetector region: the rect region. Use the shade CustomPaint to get cr size: iterate CustomPaint widgets whose painter runtimeType.toString() == '_CropShade', read dynamic r.
+
+Then two gestures: center points, start at center±30, move to center±10 → scale ~0.33 → crop shrinks (but clamped at min 0.08; base width 0.9*rect... scale 0.33 → 0.3 width; fine).
+
+Let me write it and run; if it's flaky/fails quickly, delete the test and note.
+
+I'll put it in test/crop_gesture_test.dart — task allowed "在 test/ 里用两指 TestGesture". Adding one more file beyond the red line? Red line says "只改 image_edit_page.dart，新增 crop_math.dart 和 crop_math_test.dart". Adding a third new test file violates the 红线 literally. The 测试 section says widget test optional "在 test/ 里". Conflict — safer to put the widget test inside test/crop_math_test.dart? That keeps files listed. But mixing widget test into crop_math_test requires flutter_test widget imports — fine, and the file is already allowed.
+
+Hmm, but a widget test in crop_math_test.dart is odd. Given 红线 is stricter (only three files), I'll add the widget test into test/crop_math_test.dart under a group. That stays within the allowed file set.
+
+Let me do it.
+
+dsh: reasoning:
+Building a widget test requires a real image file since ImageEditPage loads from File. I could create a temp PNG with `img` package (available) and pump the page. Then enter crop mode, perform two-finger gesture, and assert the box (white border) smaller by measuring the Positioned rect... We can't access private state easily. Could check via the CustomPaint _CropShade but private. Alternative: find the GestureDetector widget inside the Stack and check its child Positioned rect? Simpler: pump widget, tap 裁剪, then perform pinch, then read the `Positioned.fromRect` wrapper for border via finder of a Container with white border decoration and get its size.
+
+We can find widgets by decoration: find Container with BoxDecoration border white width 2. Then tester.getSize → smaller after pinch.
+
+Let me write it: build MaterialApp home ImageEditPage(path: tempfile). Need File IO allowed in flutter test (yes). Create PNG bytes via img package encodePng of a small image, write to Directory.systemTemp.
+
+Then pumpAndSettle. tap '裁剪' tool (Icons.crop). Then find the border Container size. Then two-finger gesture: use tester.startGesture at two points within the image rect, move apart/together.
+
+Testing pinch: 
+final g1 = await tester.startGesture(center - Offset(40,0));
+final g2 = await tester.startGesture(center + Offset(40,0));
+await g1.moveTo(center - Offset(20,0)); await g2.moveTo(center + Offset(20,0)); pump.
+That's scale ~0.5 → box shrinks.
+
+Careful: handle circles are at corners; center is safe.
+
+Getting the rect: I can find `CustomPaint` with painter _CropShade — private, not accessible from test. Instead find the Container with white border decoration:
+
+final border = find.byWidgetPredicate((w) => w is Container && w.decoration is BoxDecoration && (w.decoration as BoxDecoration).border != null && ...border.top.color == Colors.white);
+
+Then size before/after.
+
+Note there may be other white containers; scope with find.descendant of the Stack? Let's just use predicate and expect exactly one.
+
+Also image: Image.memory decode async; pumpAndSettle may work. The page calls _load with compute() — compute works in tests (runs synchronously? flutter_test compute runs on isolate maybe fine). Use pumpAndSettle with timeout.
+
+Let's write the test and run it; if flaky, drop it (optional per task). Timebox: one or two attempts.
+
+dsh: reasoning:
+pumpAndSettle timeout at line 20 (after initial pumpWidget) — the CircularProgressIndicator spins waiting for image load. Actually the image load is async via compute + File read; pumpAndSettle times out because of the spinner. Use pump with durations instead.
+
+Let me replace pumpAndSettle after pumpWidget with a loop of pump(Duration) until image appears. compute in tests runs... compute works in test (runs on same isolate? in flutter_test compute is synchronous-ish). Let's do: for (i<50) { await tester.pump(const Duration(milliseconds: 50)); if (find... ) break; }
+
+Also the previous failure at line 20 was the first pumpAndSettle. Let's fix.
+
+Also border finder: handle circles Containers have BoxDecoration with border? handle inner container has border kRose color. The border rect white border is inside IgnorePointer. The predicate checks border.top.color == Colors.white — handle has kRose, ok. But note if crop overlay isn't visible yet...
+
+Let's fix pumping.
+
+dsh: reasoning:
+Line 35 is `expect(border, findsOneWidget);`? Let's check line numbers. Probably the container predicate. The border Container is inside IgnorePointer; predicate checks w.decoration is BoxDecoration with border. Maybe finder matched 0 because BoxDecoration border type is Border but `.top.color` maybe fine. Let's debug by dumping widget tree, or simpler: add a Key to the border container in the page? Can't add key? Allowed to change page; add `key: const ValueKey('cropBorder')` on the border Container. That's clean and test-friendly.
+
+dsh: reasoning:
+The border finder found none — likely `BoxDecoration.border` is `BoxBorder`, and `Border.all` returns a `Border`; but `w is Container` predicate — the Container widget's `decoration` property... Container stores `decoration`. Should work. Maybe tap on crop didn't switch mode because the icon button is disabled? No. Wait — the crop icon also appears? Let me debug by dumping the widget tree in the test. Simpler: check `find.text('全图')` presence to confirm crop mode, and use `find.byType(Stack)`... Better: give the border container a Key? Modifying lib to add a key is acceptable but pollutes. I can instead find by predicate on Container with `decoration` whose `border` is a Border with white top color — but maybe checkType: Container is in a different file? No.
+
+Possibly the issue: `Container(decoration: ...)` with no child inside `Positioned.fromRect` — Container with decoration creates DecoratedBox, and `Container` widget exists in tree. Hmm.
+
+Maybe crop mode wasn't entered: after `tester.tap(find.byIcon(Icons.crop))` and pump, mode = 'crop', the bottom bar has Icons.close, 全图, check; and Icons.crop button gone. Then the overlay appears.
+
+Let me just print widget tree to debug quickly.
+
+dsh: reasoning:
+No containers at all — meaning page still loading (spinner), crop mode never entered, and tap on crop icon found... wait we expected crop icon found — the loop breaks after 60 pumps regardless. `expect(find.byIcon(Icons.crop), findsOneWidget)` passed? There's Icons.crop also maybe in bottom tool row which appears when mode==''. So image loaded? containers=0 means the widget tree has no Container — but the page while loading shows CircularProgressIndicator and bottom bar with tools (which are InkWell/Column/Text, no Container). So image not loaded -> cur==null -> tapping crop sets mode='crop' but body still spinner.
+
+So the image decode isn't completing in test. `decodeImageFromList` requires async image codec; in flutter test it should work but needs runAsync maybe. Actually decodeImageFromList uses instantiateImageCodec which is async and in tests requires `tester.runAsync` for real async I/O. File read also async — real I/O requires runAsync.
+
+Simplest: wrap initial load in tester.runAsync polling until crop button appears.
+
+Let's do:
+```
+await tester.runAsync(() async {
+  await tester.pumpWidget(...);
+  for (...) { await Future.delayed(20ms); await tester.pump(); }
+});
+```
+Better: pumpWidget outside, then runAsync loop with pumps.
+
+Let me try.
+
+dsh: reasoning:
+Image loaded now (text '裁剪' found). But border Container with border not found — because decoration border's `top.color` comparison? Border.all(color: Colors.white) is `Border.all` which creates Border(top: BorderSide(...)) — color white. Should match. Unless the border Container is inside IgnorePointer with Positioned.fromRect inside Stack inside the GestureDetector's child... it should exist.
+
+Wait: predicate requires `w is Container && w.decoration is BoxDecoration`. OK. But there may be multiple containers with white borders? found 0 though.
+
+Hmm — maybe mode != 'crop' because tapping Icons.crop did nothing? But test asserted find.text('裁剪') findsWidgets, which also exists as tool label in normal mode. So image may be loaded but not in crop mode. Tap happened before load? No — order: wait, then tap. But tap needs a pump after it... I replaced pumpAndSettle with pump + pump(50ms). Fine.
+
+Actually maybe the tap on Icons.crop failed because the bottom bar is off-screen? Screen 800x600, bottom bar present. But the toast? no.
+
+Let me debug: print whether '全图' exists after tap.
+
+dsh: reasoning:
+Mode is still '' — the tap on Icons.crop didn't switch to crop mode. Because after runAsync loop, maybe tap happened before pump? We tapped find.byIcon(Icons.crop) then pump. But the icon crop in bottom bar is inside InkWell; tester.tap should work. Unless the tap landed but mode didn't rebuild? We did pump. Hmm, cropicons=1 means still bottom bar (in crop mode, bottom has 全图 TextButton and no crop icon). So tap didn't trigger.
+
+Possibly the tap was blocked because the layout of bottom bar... or because tester.tap needs pump between. Actually the issue: after runAsync, the widget tree may not have settled; tap works on the last rendered frame. It should.
+
+Maybe the tap triggered `_cropOverlay`? No.
+
+Alternatively the tap happened while the loading still in flight? The loop broke when '裁剪' text found — '裁剪' text appears in bottom bar tool label before image loads? Bottom bar is always rendered with tools disabled when cur==null. So '裁剪' text exists immediately, loop exits instantly, and then crop icon tap happens while cur==null → onTap null, disabled. Yes! `onTap: busy || cur == null ? null : f`.
+
+Fix: wait for image loaded, e.g. wait until GestureDetector-less indicator gone: find by Icon(Icons.crop) tap enabled? Better wait until find.byType(CircularProgressIndicator) is empty and Icons.crop still enabled. Use predicate: wait until no CircularProgressIndicator and Image widget present.
+
+Let me wait for `find.byType(Image)` to exist (image memory widget appears when cur != null).
+
+dsh: reasoning:
+Image never appears — File read/decode inside `compute` may not complete under runAsync polling in fake async. Actually `compute` spawns isolate; in flutter_test, isolates work but need `await tester.runAsync`. Also `decodeImageFromList` requires the binding to run frames? decodeImageFromList uses `instantiateImageCodec` which in test needs async I/O; it works usually.
+
+Hmm—the _load is also catching errors and calls toast + Navigator.pop, which would remove page. Maybe file read fails; or `_normalize` returns jpg for no alpha → decodeImageFromList works. But error path pops the page silently.
+
+Instead of fighting, why not take a simpler approach: test using `runAsync` for the whole load with real pumping? Common approach: after pumpWidget, do `await tester.runAsync(() async { await Future.delayed(Duration(seconds:1)); }); await tester.pump();`.
+
+Let me debug quickly: add debugPrint of found CircularProgressIndicator / exception by intercepting? Simpler: check whether ImageStore/toast pops. Let me check if the page pops: find.byType(ImageEditPage).
+
+Let me write a tiny try in the test printing at intervals inside runAsync: number of Image and CircularProgressIndicator widgets. Note widget tree queries inside runAsync are fine.
+
+Actually one likely blocker: `compute()` uses isolate; in flutter_test with the default `AutomatedTestWidgetsFlutterBinding`, isolates do run under runAsync. Fine.
+
+Another likely blocker: `decodeImageFromList` calls `ImmutableBuffer.fromUint8List` → async; needs event loop; under runAsync yes.
+
+We've been polling with `find.byType(Image)` — but `Image.memory` widget builds a RawImage; `Image` widget should be present regardless of decode once `cur != null`... wait cur != null happens after decodeImageFromList; so Image widget appears then. Also `Checkerboard(child: Image.memory(...))`. So polling Image is right.
+
+Unless `_load` throws and pops. The File read: real file exists (we wrote sync). `_normalize` in isolate: img.decodeImage ok, encodeJpg ok. `_setImage` → decodeImageFromList: under runAsync with delayed... but we are awaiting Future.delayed inside runAsync, the real event loop runs, so continuations proceed.
+
+Hmm, but `setState` called during runAsync sets state and needs pump; we do pump after.
+
+Maybe the failure is a thrown error: in test env, `toast()` uses ScaffoldMessenger — before Scaffold... it's inside MaterialApp so fine. And Navigator.pop on the root route → page disappears.
+
+Let me print diagnostics: run test with a loop printing counts and also wrap: check find.byType(ImageEditPage).
+
+Time is limited; optional widget test. I could instead avoid the async file load entirely by testing the overlay through... hmm the crop overlay is private.
+
+Alternative: simulate with real file and use `tester.runAsync` around a full `pumpWidget`?? Actually recommended: `await tester.runAsync(() async { await tester.pumpWidget(...); await Future.delayed(...); });`—pumpWidget inside runAsync is discouraged but works.
+
+Let me quickly add diagnostics and see.
+
+dsh: reasoning:
+Still loading after 4s of runAsync. `_normalize` uses `compute` which needs real isolate; in tests that may not complete under runAsync? Actually compute in tests works but isolate startup can be slow; also the fake async may not process the compute completion since the Future completion callback is scheduled on the test's zone, which is not pumped during runAsync... Right: runAsync runs real async, but the compute future's completion is a microtask in the test zone maybe delivered. The problem: await inside runAsync doesn't pump the widget tree, but setState happens.
+
+Simpler: bypass _load by using a tiny path route? Alternative: don't test the page; test the overlay widget standalone. But _cropOverlay is private.
+
+Better approach: avoid the real image load — ImageEditPage always loads from file in initState. Could we pre-populate? No injection.
+
+Alternative: instead of widget test, keep only pure function tests (task says widget test optional). The math test covers requirements. But a gesture integration check is valuable... However time. Task explicitly marks widget test as optional. I've spent enough. Let me try one quick thing: pump with longer duration in runAsync plus pump between—use `tester.pump()` inside runAsync loop? Can't pump inside runAsync.
+
+Actually compute() in widget tests: known workaround—isolates do run under runAsync. But the future completion resumes in the test zone, needing microtask draining which pump does. My loop only awaits delay inside runAsync; setState may have occurred after compute finished but before pump... IMG=0 SPIN=1 means still cur==null even after subsequent pump. So compute didn't finish in 4s? Possible since spawning isolate is slow (~100ms) but not 4s.
+
+Hmm, `_load` awaits `File.readAsBytes()` then compute. Under fake async before runAsync, the read future may not complete... it should complete during runAsync.
+
+Maybe exception thrown → toast + pop (SNACK=0, PAGE still 1). Hmm.
+
+Let me just try: runAsync loop with 5s and check if SetState via pump. Actually maybe the issue: `img.encodePng` of 200x200 fine.
+
+Let me debug differently: check whether toast happened by waiting more and printing again after extra pump. Quick test: increase loop to 500 iterations (10s) and print again.
+
+Actually likely cause: `compute` isolate result delivery requires the fake-async clock? No.
+
+Better: in test, override `debugDefaultTargetPlatformOverride`? No.
+
+I'll do one experiment: retry with more time and an extra pump each iteration outside runAsync:
+
+for i in 0..50: await runAsync(() => Future.delayed(50ms)); await tester.pump();
+
+That interleaves pumping which drains microtasks.
+
+dsh: reasoning:
+Wait: g1 moves +5 x, g2 moves -5 x — that's moving fingers TOWARD each other, so distance shrinks → scale < 1 → crop shrinks. Correct ("捏合" = pinch in). Good, and the test asserts width decreases. Passed.
+
+Now also verify pan (1 finger) and handle still work? Could add quick assertions. The task's optional widget test is done. Let's also add a single-finger pan assertion in same test? Keep simple but maybe add second widget test for corner handle still working — that guards requirement 2. Cheap to add. Let me add a second testWidgets verifying dragging the top-left handle shrinks/changes only left/top (frame size changes, right edge stays). That's valuable regression coverage.
+
+Handle finder: GestureDetector with onPanUpdate non-null inside 36x36... Easier: use find.byType(GestureDetector) and pick ones with onPanUpdate != null; there are 4 handles. Get topLeft-most by position. Drag by (20,20). Then border rect should move right/down on left/top but right/bottom unchanged.
+
+I'll implement by locating the 4 handle detectors, choose the one with smallest (left+top) center. Drag by 10 px. Assert border left increases, top increases, width decreases.
+
+Careful: dragging the handle also might be intercepted? Handles are above the scale layer in Stack, so they win. Good — this test verifies that.
+
+Let me add it.
+
+这两条手势测试都已通过，其中包含把手优先级的验证。现在重跑分析和全套测试。
+exit=124

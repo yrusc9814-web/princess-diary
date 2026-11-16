@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../services/auto_backup.dart';
 import '../services/backup.dart';
 import '../services/settings.dart';
 import '../widgets/common.dart';
@@ -65,6 +66,102 @@ class _BackupPageState extends State<BackupPage> {
     if (mounted) setState(() => busy = false);
   }
 
+  Future<void> _toggleAuto(bool on) async {
+    Settings.autoBackupEnabled = on;
+    setState(() {});
+    try {
+      if (on) {
+        await AutoBackupService.schedule();
+        toast(null, '已开启，每天凌晨 3 点自动备份');
+      } else {
+        await AutoBackupService.cancel();
+        toast(null, '已关闭自动备份');
+      }
+    } catch (e) {
+      toast(null, '设置失败：$e', style: 'dark');
+    }
+  }
+
+  /// 手动触发一次（验证用）：立刻按自动备份的完整流程跑一遍。
+  Future<void> _runAutoNow() async {
+    setState(() {
+      busy = true;
+      busyText = '正在检查并备份…';
+    });
+    try {
+      final r = await AutoBackup().run();
+      if (!mounted) return;
+      toast(null, r.skipped ? '数据无变化，已跳过' : (r.ok ? '已备份：${r.fileName}' : '备份失败：${r.error}'), style: r.ok ? 'success' : 'dark');
+    } catch (e) {
+      toast(null, '备份失败：$e', style: 'dark');
+    }
+    if (mounted) setState(() => busy = false);
+  }
+
+  Widget _autoCard() {
+    final on = Settings.autoBackupEnabled;
+    final at = Settings.autoBackupAt;
+    final file = Settings.autoBackupFile;
+    final check = Settings.autoBackupLastCheck;
+    final err = Settings.autoBackupError;
+    final skipped = check > 0 && check > at;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 12, 14),
+      decoration: BoxDecoration(
+        color: const Color(0xEEFFFFFF),
+        boxShadow: kCardShadow,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: kPinkBorder),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.schedule, color: kRose),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text('自动备份', style: TextStyle(color: kInk, fontSize: 17, fontWeight: FontWeight.w800)),
+          ),
+          Switch(value: on, onChanged: busy ? null : _toggleAuto),
+        ]),
+        Text(
+          on ? '每天凌晨 3 点左右自动备份一次' : '已关闭，不会自动备份',
+          style: const TextStyle(color: kGrayText, fontSize: 13),
+        ),
+        const SizedBox(height: 10),
+        _kv('上次自动备份', at == 0 ? '暂无' : _fmt(at)),
+        _kv('备份文件', file.isEmpty ? '暂无' : file),
+        _kv('上次检查', check == 0 ? '暂无' : _fmt(check)),
+        if (skipped) const Padding(
+          padding: EdgeInsets.only(top: 2),
+          child: Text('数据无变化，已跳过', style: TextStyle(color: kRose, fontSize: 13, fontWeight: FontWeight.w600)),
+        ),
+        if (err.isNotEmpty) Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Text('上次失败：$err', style: const TextStyle(color: kRoseDark, fontSize: 12)),
+        ),
+        const SizedBox(height: 10),
+        const Text('每天凌晨 3 点自动备份到 文档/公主日记备份，只保留最新一份；手机省电可能让时间稍晚。',
+            style: TextStyle(fontSize: 12, color: kGrayText, height: 1.6)),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton.icon(
+            onPressed: busy ? null : _runAutoNow,
+            icon: const Icon(Icons.play_circle_outline, size: 18),
+            label: const Text('立即检查并备份'),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _kv(String k, String v) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(width: 92, child: Text(k, style: const TextStyle(fontSize: 13, color: kGrayText))),
+          Expanded(child: Text(v, style: const TextStyle(fontSize: 13, color: kInk))),
+        ]),
+      );
+
   @override
   Widget build(BuildContext context) {
     final last = Settings.lastExport;
@@ -102,6 +199,8 @@ class _BackupPageState extends State<BackupPage> {
               ),
             ]),
           ),
+          const SizedBox(height: 20),
+          _autoCard(),
           const SizedBox(height: 24),
           const Text('手动备份与迁移', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: kInk)),
           const SizedBox(height: 8),
@@ -133,7 +232,8 @@ class _BackupPageState extends State<BackupPage> {
             ),
           ]),
           const SizedBox(height: 18),
-          const Text('备份包为 .wrdx 文件（数据 + 全部图片），可通过微信、网盘、电脑等保存。也支持导入 1.0 版导出的 .zip 备份。',
+          const Text('备份包为 .wrdx 文件（数据 + 全部图片），文件名为 gongzhuriji_年-月-日_时分.wrdx，可通过微信、网盘、电脑等保存。'
+              '也支持导入 1.0 版导出的 .zip 备份。',
               style: TextStyle(fontSize: 12, color: kGrayText, height: 1.6)),
         ]),
         if (busy)

@@ -1,0 +1,1420 @@
+=== waiting lock Sun Nov 15 15:40:13 UTC 2026 ===
+=== got lock Sun Nov 15 15:40:13 UTC 2026 ===
+=== try1 Sun Nov 15 15:40:13 UTC 2026 ===
+(node:5099) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.
+(Use `node --trace-warnings ...` to show where the warning was created)
+dsh: reasoning:
+Let me explore the repository.
+
+dsh: reasoning:
+Now, let me look at how ImageEditPage is called elsewhere, and ImageStore API (saveOriginal, savePng paths — are they relative paths?).
+
+Important: `_El.image` is `rel` from `ImageStore.saveOriginal(x.path)` — a relative path. ImageEditPage takes `widget.path` as absolute path. AppImage probably resolves relative paths. So for collage photo, need absolute path resolution.
+
+Let me check images.dart and common.dart AppImage.
+
+dsh: reasoning:
+Baseline is 27 issues (all info), recorded in T215-analyze-after.txt. Task says baseline 27 info. I'll save before/after. Note the task says save after file; I should create a before too? It says "与基线 27 条 info 比" — baseline is 27. I'll run a before capture for evidence (T216-analyze-before.txt) then after.
+
+Let me set up the env and run analyze baseline in background while I write code.
+
+Plan:
+1. collage_page.dart: _El add `original`; toolbar crop button; _cropPhoto function.
+2. image_edit_page.dart: cropOnly param.
+3. test file.
+4. analyze + tests.
+
+Let's think about the cropOnly flow in image_edit_page:
+- `cropOnly: true` → initState sets mode='crop' after load. When applying crop (check button), immediately save PNG and pop EditedImage. Need busy handling.
+
+Implementation approach: add `final bool cropOnly;` to constructor default false. In `_load`, after setting image, if cropOnly set mode='crop'. In `_applyCrop`: if widget.cropOnly → compute crop, save PNG, pop with EditedImage(image, original: widget.path, thumb: ''). Hmm EditedImage requires thumb. Could return just image path... Task says "应用裁剪后直接 pop 返回 EditedImage（或返回图片路径）". Returning EditedImage with thumb (make thumb costs extra). Simpler: return String path? But then a page returns a dynamic type; callers use push<EditedImage>. Since only collage uses cropOnly, we can return String. But cleaner: return EditedImage(image, widget.path, '') with thumb generated via ImageStore.makeThumb? That's extra I/O but fine and consistent. Actually for collage we only need image. Let's return `EditedImage(image, original, image)`? thumb isn't used. Hmm to be robust and typed for the collage: define the return as EditedImage and use `r.image`. I'll set thumb: image (no extra work) — but semantics off. Alternatively generate thumb lazily: `thumb = await ImageStore.makeThumb(image)`; costs a decode. Keep simple: skip thumb generation and pass image as thumb? I'd rather return a String path for cropOnly and have collage handle `push<String>`. But mixing routes returning different types based on a param is odd but fine since cropOnly is dedicated.
+
+Let me pick: cropOnly returns `EditedImage` for type consistency, with thumb computed via makeThumb (cheap enough, 400px). Actually ImageStore.makeThumb reads from disk and decodes—fine, it's an app operation.
+
+Hmm, but if crop applied and busy is shown, popping with in-flight compute... do:
+
+```dart
+Future<void> _applyCrop() async {
+  if (cur == null) return;
+  setState(() => busy = true);
+  final r = ...;
+  final out = await compute(_crop, (cur!, [..]));
+  if (widget.cropOnly) {
+    final image = await ImageStore.savePng(await compute(_toPng, out), 'img');
+    if (!mounted) return;
+    setState(() => busy = false);
+    Navigator.pop(context, EditedImage(image, widget.path, image));
+    return;
+  }
+  await _setImage(out);
+  ...
+}
+```
+Wait _crop already returns PNG bytes. So savePng(out, 'img') directly. Then pop.
+
+Also in cropOnly mode the bottom bar shows the crop confirm row; close button `setState(() => mode = '')` would leave mode '' and show normal tools — not desired. In cropOnly, the close (X) in crop bar should pop with null (cancel). Also AppBar back button pops naturally (null). And "全图" button would crop whole image — that saves full image; acceptable? In cropOnly mode "全图" means no crop. Better keep it; harmless. Maybe in cropOnly, hide "全图"? Keep behavior minimal: keep it, apply crop of full image returns original resized copy. Fine.
+
+Also if cropOnly and mode '' appear (after cancel of mode?) We'll make close pop. Additionally guard: in cropOnly mode, don't show '下一步' etc. Since mode starts as 'crop' and close pops, mode '' won't be reached. But after `_applyCrop` in non-cropOnly mode it returns to ''. For cropOnly we pop.
+
+Also `_load` failure pops anyway.
+
+Now collage page:
+
+_El:
+```dart
+class _El {
+  ...
+  String? original; // 裁剪前的原图（相对路径）
+  _El({... this.original});
+  Map<String,dynamic> toJson() => {..., if (original != null) 'o': original};
+  factory _El.fromJson(...) => _El(..., original: j['o']);
+}
+```
+Task: toJson key 'o', fromJson compatible with missing 'o'. Using `if (original != null)` keeps old JSON clean; but maybe always include 'o': original (null) is fine too. Either way. Include conditionally to avoid history diffs? _snap compares JSON; both fine. I'll always include 'o': original — simpler, and fromJson handles missing. Hmm tests check roundtrip with/without 'o'. Either works.
+
+Crop action:
+```dart
+Future<void> _cropPhoto() async {
+  final i = sel;
+  if (i == null) return;
+  final e = els[i];
+  if (e.kind != 'photo' || e.image == null) return;
+  final src = e.original ?? e.image!;
+  final r = await push<EditedImage>(context, ImageEditPage(path: ImageStore.abs(src), cropOnly: true));
+  if (r == null) return;
+  setState(() {
+    e.original ??= e.image;      // 第一次裁剪前记下原图
+    e.image = r.image;
+    _snap();
+  });
+}
+```
+Need `if (!mounted) return;` before setState — analyzer's use_build_context_synchronously might flag using context after await? `push` is a helper taking context; that's before await. setState after await is fine with mounted guard? Actually setState after await doesn't need context but linter may complain about `context` usage after await in _cropPhoto? No context use after await. Add `if (!mounted) return;` anyway for safety.
+
+Wait: e.original ??= e.image — first crop stores the pre-crop image. Good. But note: after first crop image becomes cropped; original stays full. Subsequent crops open original. Task item 3 satisfied.
+
+Toolbar: add crop button when selected element kind == 'photo'. Where in the row? Probably before/after 照片. Row has 5 tools with Expanded; adding a 6th shrinks each. That's fine. Maybe put 裁剪 right after 照片.
+
+```dart
+final selEl = sel != null && sel! < els.length ? els[sel!] : null;
+...
+if (selEl?.kind == 'photo') _tool(Icons.crop, '裁剪', _cropPhoto),
+```
+Careful sel could be out of range after removals? sel set to null on remove. Use guard.
+
+Also "更多" sheet duplicate copies via toJson → includes 'o' automatically. Good.
+
+Now push helper signature — check widgets/common.dart push.
+
+Also for widget tests: can we test toolbar visibility? CollagePage requires DB init for some functions but build might need AppDb? Building CollagePage with canvasJson containing els. The toolbar visibility can be tested by pumping CollagePage(canvasJson: ...) and tapping element to select. But tapping element: the element's GestureDetector onTap sets sel. AppImage loads from ImageStore.root — for json with image path missing file, AppImage may error but probably shows placeholder. Let's check AppImage implementation.
+
+Also CollagePage init: _snap only. Canvas parse ok. Build uses kSoftShadow etc. Fine without DB. But ImageStore.root is late — AppImage may call ImageStore.abs only when image non-null. If photo element has image 'x.jpg', AppImage tries File read → async error, maybe caught. Let's look at common.dart AppImage.
+
+Let me read relevant part.
+
+dsh: reasoning:
+AppImage is a StatelessWidget with `rel`; the key can be used on the AppImage widget. But in _element, `_El` elements aren't keyed. In the toolbar, _tool items aren't keyed either. I can add keys to tool items in the toolbar — e.g., `_tool(Icons.crop, '裁剪', _cropPhoto, key: const Key('collage-crop-tool'))`. But that modifies _tool signature (fine, allowed file). However widget test for collage page: CollagePage requires ImagePicker etc. — but rendering the page just builds. No DB needed unless _addClothes. ImageStore.abs used only when rel non-null. So widget test with CollagePage(canvasJson: ...) works without plugin init as long as we don't tap things triggering pickers or DB. initState with canvasJson decodes els. Good: we can build a canvas with a photo element and a text element, tap on the photo element to select it, then check the toolbar has 裁剪 icon. Tapping the element: GestureDetector onTap → setState sel=i. In widget test, tapping requires finding element widget. We can find by AppImage with rel 'x.png' (Image.file will attempt to load file; errorBuilder handles... in test, Image.file with nonexistent path in widget tests: it throws async error? It reports error to FlutterError via errorBuilder — ok, errorBuilder catches). Actually loading a file image in tests can produce exceptions printed but errorBuilder handles them. To be safe, photo path could be a real temp PNG file created in test... but ImageStore.abs requires ImageStore.root late init — accessing it uninitialized throws LateInitializationError. Set ImageStore.root = temp dir in test. That's fine (public static late field). Then create a real file there.
+
+Hmm, t215 test uses ImageEditPage with a real file path, and image decode through compute, works with runAsync.
+
+For collage widget test: tap element → sel set. Then find crop icon. Tapping via tester.tap(find.byType(AppImage)) — AppImage is inside GestureDetector, hit test will hit. Then check find.byIcon(Icons.crop) findsOneWidget when photo selected; for clothes element with image rel and kind clothes, tap → no crop. Unselected → no crop.
+
+But careful: Icons.crop might already appear elsewhere in CollagePage? No.
+
+Also test _El JSON roundtrip: _El is private. Can't import. Options: test via CollagePage behavior? Or make the test check JSON through page? Hmm. The task says "test/t216_collage_crop_test.dart：_El 带/不带 'o' 的 JSON 往返". Since _El is private, we could test indirectly: build CollagePage with canvasJson containing 'o' and then read _json via...? Not exposed.
+
+Alternative: create the test with a local mirror of the JSON schema? That doesn't test real code.
+
+Option: expose a small helper in collage_page.dart for testability, e.g. a top-level function `Map<String,dynamic> collageElToJson(Map<String,dynamic> j)`? That's ugly.
+
+Better: make _El accessible via a public wrapper? Perhaps add a public top-level function in collage_page.dart:
+
+```dart
+/// 供测试使用：把单个元素的 JSON 做一次往返（避免把 _El 暴露成公开 API）。
+Map<String, dynamic> debugRoundTripEl(Map<String, dynamic> j) => _El.fromJson(j).toJson();
+```
+
+But that adds public API to lib for tests — acceptable and minimal, annotated as test-only. Hmm, "新代码不得新增 info" — a doc comment is fine.
+
+Alternatively test _El roundtrip through the page: CollagePage accepts canvasJson; then the rendered page's internal json isn't observable. But we can observe behavior: an element with 'o' field -> ...not visible.
+
+Actually we could test roundtrip via page-level: create CollagePage(canvasJson with photo having 'o'), then trigger something that produces _json: e.g. tap 完成 → requires boundary render... complicated.
+
+Simplest robust approach: add top-level public test helper `collageElJsonRoundTrip`. I think a cleaner approach: make the `_El` class non-private, i.e., `CollageEl`. But that changes existing code naming (only within this file). Hmm, `_El` is used extensively; renaming to public class `CollageEl` in collage_page.dart is a bigger diff but allows natural testing (task says "_El 增加可选字段 original"). Renaming might be considered unnecessary churn. I'll go with a small exported function.
+
+Actually wait — maybe better: keep class private, and add:
+
+```dart
+@visibleForTesting
+Map<String, dynamic> collageElFromJson(Map<String, dynamic> j) => _El.fromJson(j).toJson();
+```
+`@visibleForTesting` from foundation — importing foundation in collage_page? material exports foundation's visibleForTesting? `package:flutter/material.dart` exports foundation. Yes, material.dart exports foundation.dart. So @visibleForTesting is available. But using it outside a test file in lib... annotation on a public top-level function used by test is fine. Hmm, analyzer might warn "invalid_use_of_visible_for_testing_member" only when used from non-test code. Fine.
+
+Simpler: no annotation, just doc comment "测试用". Let me avoid extra annotations... Actually `unnecessary_import` risk none.
+
+Now also test toolbar: needs keys? find.byIcon(Icons.crop) and text '裁剪' suffice.
+
+Now consider the visual: crop toolbar button only when selected photo. Implementation:
+
+```dart
+final selEl = (sel != null && sel! >= 0 && sel! < els.length) ? els[sel!] : null;
+...
+_tool(Icons.checkroom, '单品', _addClothes),
+_tool(Icons.photo_outlined, '照片', _addPhoto),
+if (selEl?.kind == 'photo') _tool(Icons.crop, '裁剪', _cropPhoto),
+_tool(...)
+```
+
+Since 6 items in a Row of Expanded — widths shrink, fine.
+
+_cropPhoto implementation:
+
+```dart
+Future<void> _cropPhoto() async {
+  if (sel == null || sel! >= els.length) return;
+  final e = els[sel!];
+  final src = e.original ?? e.image;
+  if (src == null || src.isEmpty) return;
+  final r = await push<EditedImage>(context, ImageEditPage(path: ImageStore.abs(src), cropOnly: true));
+  if (r == null || !mounted) return;
+  setState(() {
+    e.original ??= e.image;      // 第一次裁剪前记下原图
+    e.image = r.image;
+    _snap();
+  });
+}
+```
+
+Note: mount-check after await — to avoid `use_build_context_synchronously` info we don't use context after await (only setState). `if (!mounted) return;` fine. Analyzer's use_build_context_synchronously triggers when using context after await. We use `mounted` then setState — OK.
+
+But careful: `sel` may change during await? User can't interact while page pushed. But element could be removed... we captured `e` reference, fine.
+
+Also `_snap()` inside setState — consistent with existing style.
+
+Edge: if `e.image == null` (photo without image) skip.
+
+Now on ImageEditPage cropOnly. Also note in `_next` with cropOnly: saveOriginal(widget.path) will re-save the original - we don't call _next in cropOnly mode.
+
+Implement `_applyCrop`:
+
+```dart
+Future<void> _applyCrop() async {
+  setState(() => busy = true);
+  final r = ...;
+  final out = await compute(_crop, (cur!, [...]));
+  if (widget.cropOnly) {
+    // 只裁剪：直接把裁好的图存盘并返回，不进「下一步/添加单品」流程
+    final image = await ImageStore.savePng(await compute(_toPng, out), 'img');
+    if (!mounted) return;
+    setState(() => busy = false);
+    Navigator.pop(context, EditedImage(image, ImageStore.abs(widget.path), image));
+    return;
+  }
+  await _setImage(out);
+  ...
+}
+```
+
+Hmm EditedImage(image, original, thumb): original should be a path (absolute? In clothes flow, `original = await ImageStore.saveOriginal(widget.path)` returns rel). For consistency with clothes flow, original is a relative path. In our collage case, we use only r.image. So set original to widget.path (absolute) is inconsistent but unused... better: keep `original` as suggested: `ImageStore.abs` vs rel. Since unused by our caller, either. I'll pass `widget.path`? Hmm for cleanliness: original: widget.path (the source path as given). thumb: image (unused). Maybe simpler: return only when cropOnly, and use `EditedImage(image, widget.path, image)`.
+
+Actually maybe better design: in cropOnly mode don't pop EditedImage but pop the image rel? Task allows either. I'll use EditedImage for uniformity since caller of collage imports EditedImage anyway.
+
+Also in cropOnly mode, what about the close (X) in crop bottom bar: currently `mode=''` which returns to edit toolbar with 下一步 — bad for cropOnly. In cropOnly mode, X should pop with null (cancel). So:
+
+```dart
+IconButton(icon: const Icon(Icons.close), onPressed: () => widget.cropOnly ? Navigator.pop(context) : setState(() => mode = '')),
+```
+
+Task says "取消则什么都不变" — pop null → nothing changes.
+
+Also appBar for cropOnly: title '裁剪'; maybe add back button default (AppBar auto back button pops null). Fine.
+
+Also initState in cropOnly: mode='crop'; undoStack empty so no undo button shown (mode != '').
+
+Also `_load` sets image; mode already 'crop' means overlay appears only after cur != null. Good.
+
+One risk: in cropOnly, `_scaleToImage` etc fine.
+
+Another consideration: crop rect default 0.05..0.95 — user can drag handles to full image via 全图.
+
+Now the original image: saved rel path (jpg 1600 long edge). Cropped image saved as png. On re-crop we open original → full image available. 
+
+Now tests. Let's write test file:
+
+1. `_El` JSON roundtrip with 'o' and legacy without 'o' — via helper `collageElJsonRoundTrip`.
+2. Widget: photo selected shows 裁剪; clothes/text/unselected doesn't.
+
+Widget test setup:
+```dart
+testWidgets('选中照片时工具栏出现裁剪按钮', (tester) async {
+  final dir = Directory.systemTemp.createTempSync('t216_img');
+  ImageStore.root = dir.path;
+  File('${dir.path}/p.png').writeAsBytesSync(pngBytes);
+  await tester.pumpWidget(MaterialApp(home: CollagePage(canvasJson: jsonEncode({'els': [{'k':'photo','i':'p.png',...}], 'bg':[0xFFFFFFFF]}))));
+  await tester.pump();
+  expect(find.text('裁剪'), findsNothing);
+  await tester.tap(find.byType(AppImage));  // photo
+  await tester.pump();
+  expect(find.text('裁剪'), findsOneWidget);
+});
+```
+
+Careful: find.byType(AppImage) may match multiple. For photo-only canvas one element. Image.file loading async in test: FlutterError? Using errorBuilder will handle. But in widget tests, `Image.file` loading uses dart:io with async decode — may schedule timers? It could throw "FileSystemException" caught by errorBuilder. Should be fine; but there might be pending timers at end of test → "A Timer is still pending" errors? Image loading doesn't set timers normally.
+
+Also 'find.text('裁剪')' — also could match nothing else. Good. But be careful: after tapping element, `_snap` etc. Fine.
+
+Additionally: verify tapping the crop button pushes ImageEditPage in crop mode? Could test with a real file and runAsync; maybe heavy. Could do: tap 裁剪 → pump → expect find.byType(ImageEditPage) findsOneWidget, and find.text('裁剪')... The crop page needs to load file; we can just check ImageEditPage exists and that the appbar title is 裁剪. Since ImageEditPage is pushed with MaterialPageRoute, pump a couple frames. Then verify mode: the crop page shows IconButton close + 全图 text when in crop mode — 全图 appears only in crop mode (also in toolbar? '裁剪' tool exists in '' mode; '全图' only crop). Check find.text('全图') findsOneWidget. That's a solid test that it enters crop mode. Then tap close (Icons.close in crop bar) — but there may be multiple Icons.close? In crop mode bottom has Icons.close only. Pop with null → collage unchanged.
+
+Might be flaky due to image loading; but the crop overlay is drawn on top regardless (it's in the Stack even before cur loads? `if (mode=='crop') _cropOverlay(rect)` is inside the else branch where cur != null, so needs image loaded). Hmm — the `_bottom()` is always rendered (outside the Expanded), so 全图 appears regardless of image load. Good.
+
+I could add this as a third test. For image load in crop page, reading file happens via compute → runAsync needed? If not loaded, no errors? `_load` uses compute which needs real async; in widget test, compute during test without runAsync throws "Timeout"? Actually compute in flutter_test works via FakeAsync? `compute` spawns isolate → in tests, timers might not pump. t215 test uses runAsync loop to let it load. If we don't load the image, the future just never completes within test and test ends with pending? Might cause "pending timers" errors? It's a future, not timer. Isolate spawn in tests — known to be problematic but generally doesn't fail the test unless it throws.
+
+Safer: mimic t215 pattern with runAsync loop until Image appears. That means waiting for the file decode in crop page. Since I create a real png, decode works. Let's do it, controlled: after tapping 裁剪, loop with runAsync delay+pump until find.byType(Image) non-empty, with cap.
+
+Careful: the collage page itself has AppImage → Image.file, so find.byType(Image) is already non-empty before push. Instead check `find.text('全图')` and then maybe `find.byType(Checkerboard)`? Simpler: just check 全图 and title. I'll skip image loading wait; but pending isolate may linger. Hmm, to reduce risk: after pushing crop page, do a short runAsync loop (e.g., 20 × 20ms) then pump, then close. That lets load finish or not.
+
+Actually the entire collage crop flow test 3: maybe keep it simple and just verify the page opened in crop mode without waiting for decode; then tap close and verify pop back to collage. If the isolate never resolves within the test, `_load`'s future is pending at test end; flutter_test doesn't fail on pending futures generally (only timers via FakeAsync? Actually testWidgets asserts no pending timers). compute uses Isolate.spawn; there may be a Timer? Probably not.
+
+I'll do a runAsync loop for robustness.
+
+Let me now check `flutter analyze` baseline: current T215-analyze-after has 27 issues. Task says compare to baseline 27. I'll run analyze first to capture before (should be 27).
+
+Let me check the environment/tools.
+
+dsh: reasoning:
+While waiting, let me plan edits.
+
+Edits:
+
+1. `collage_page.dart`:
+   - `_El` add `String? original;` ctor param, toJson `'o': original` — careful: toJson with null value is fine. fromJson `original: j['o']`.
+   - copy: `_El.fromJson(els[sel!].toJson())` already copies 'o'.
+   - toolbar: add conditional crop button when selected element kind=='photo'.
+   - `_cropPhoto()` method: find selected el, push ImageEditPage(path: ImageStore.abs(e.original ?? e.image!), cropOnly: true), if result != null → save? cropOnly returns EditedImage with image already saved in ImageStore. Then set e.original ??= e.image; e.image = r.image; _snap().
+
+Wait but the requirement says "之后裁剪都从 original 打开" and "第一次裁剪前记下原图". So in _cropPhoto: e.original ??= e.image before push. But if user cancels, nothing should change. Hmm: "取消则什么都不变". Setting original when cancelling changes data (though not visible). Better: remember `final src = e.original ?? e.image!;` push, and on success only then set e.original ??= e.image and e.image = new.
+
+- Replace image with new: ImageStore.savePng? cropOnly flow: `_applyCrop` in cropOnly mode produces image and pops with EditedImage(image, original, thumb). The `original` field there is from `ImageStore.saveOriginal(widget.path)` — duplicating the file. For cropOnly we shouldn't need original/thumb. Better plan: in cropOnly mode, `_applyCrop` after producing out: save png and pop with EditedImage(image, original=widget.path, thumb=''). Hmm but tests might not care. Cleaner: add a cropOnly path that pops `EditedImage`. Task says "应用裁剪后直接 pop 返回 EditedImage（或返回图片路径）".
+
+Design in ImageEditPage:
+```dart
+final bool cropOnly;
+const ImageEditPage({... this.cropOnly = false});
+```
+In initState: after _load succeeds (or immediately) set mode='crop' when cropOnly. Set inside initState: `mode = widget.cropOnly ? 'crop' : '';` — build happens after load; crop overlay appears when cur!=null. Good.
+
+In `_applyCrop`: if cropOnly → after computing out, save png → pop EditedImage(image, original: widget.path, thumb: ''). But pop needs mounted; use `if (widget.cropOnly) { setState busy...; final image = await ImageStore.savePng(...); if(!mounted) return; Navigator.pop(context, EditedImage(image, widget.path, '')); return; }`.
+
+Actually careful: `_setImage` in cropOnly would change cur then pop, that's fine but undo stack etc. Simpler: compute out, save, pop.
+
+Also cropOnly: cancel button in crop mode: currently close → mode='' which in cropOnly leaves a no-tools bottom (mode '' shows tools incl. 下一步). That's wrong: user should cancel back. In cropOnly, the crop-mode close should pop with null. Implement: `onPressed: () => widget.cropOnly ? Navigator.pop(context) : setState(() => mode = '')`. And appBar back button: default pops (null) fine.
+
+Also bottom for crop in cropOnly: hide '全图'? keep it, fine. But mode '' bottom would show tools/next-step; won't be reachable in cropOnly due to pop on close. Also after `_applyCrop` non-cropOnly resets mode=''. Fine.
+
+Also undo action in appbar shows when mode=='' only — in cropOnly mode it isn't shown.
+
+2. Toolbar crop button. The `_tool` row: add `if (sel != null && els[sel!].kind == 'photo') _tool(Icons.crop, '裁剪', _cropPhoto),`. Where to place? Probably after 照片 or at beginning? Put after '照片' makes sense? Requirement just says extra button appears. Row with 6 items on narrow screen might be tight but each Expanded shares. I'll insert right after 照片.
+
+Careful with sel index bounds: sel could be out of range after restore? sel set null on restore. Guard `sel! < els.length`.
+
+3. Tests: test/t216_collage_crop_test.dart — _El is private in collage_page.dart, cannot access from test file. Hmm! `_El` is private. Test asks: "_El 带/不带 'o' 的 JSON 往返". Can't import private class. Options: use `@visibleForTesting` export? That would require renaming _El to El (changes public API) — allowed? Red line says only change collage_page.dart, image_edit_page.dart optional param, new test. Renaming _El → keeps within collage_page.dart but touches many references. Alternatively test the JSON roundtrip indirectly by driving CollagePage with canvasJson and checking... but _El JSON is internal.
+
+Alternative: make the test check round-trip via public behaviour: construct CollagePage with canvasJson containing 'o', save via _json? _json is private too. Hmm, but CollagePage returns canvas JSON in CollageResult on _done, which requires rendering/toImage — hard in widget test but maybe doable with RepaintBoundary? toImage in widget tests works (needs `tester.runAsync`). That's heavy.
+
+Simplest legitimate approach: expose a test-visible helper in collage_page.dart, e.g. rename `_El` to `CollageEl`? That's a bigger public API change but still only in collage_page.dart. Or add `@visibleForTesting` top-level functions. Hmm.
+
+Cleaner minimal: keep `_El` private, but add at bottom of collage_page.dart:
+
+```dart
+/// 仅用于测试：把 _El 的 JSON 往返暴露出来（不参与运行时逻辑）。
+@visibleForTesting
+Map<String, dynamic> collageElJsonRoundTrip(Map<String, dynamic> j) => _El.fromJson(j).toJson();
+```
+
+That keeps red line and enables the required test. Need `import 'package:flutter/foundation.dart'` for visibleForTesting — flutter/material re-exports foundation? Yes, package:flutter/material.dart exports foundation (it exports widgets which exports foundation). `@visibleForTesting` comes from meta, exported by foundation. So fine.
+
+Actually also useful: expose json with 'o' key. Test:
+- input map with 'o' → roundtrip preserves 'o' and all other keys.
+- input without 'o' → roundtrip 'o' is null (key present with null). Assert not throw and `j['o'] == null`, image preserved.
+
+Also test widget toolbar: need CollagePage with canvasJson containing a photo element. But AppImage uses Image.file which will try load file — missing file triggers errorBuilder; in tests Image.file of nonexistent path may throw async errors. We can use a real temp file PNG. Also AppImage calls ImageStore.abs which uses ImageStore.root — `static late String root;` uninitialized → LateInitializationError! In tests, must set ImageStore.root. It's `static late String root;` public settable? It's a public static field with no setter restriction — yes we can assign `ImageStore.root = tmpDir.path`.
+
+Careful: root is `late String`, assignment allowed.
+
+So widget test: set ImageStore.root = temp dir; write a small PNG to temp dir; canvasJson with els: photo el with image 'a.png'; pump CollagePage; tap the photo element to select; then expect find.byIcon(Icons.crop)... but ImageEditPage also uses Icons.crop; not present here. Also collage page bottom toolbar has no crop by default. Tap element: find.byType(AppImage) → tap. Then pump and check.
+
+Then select clothes el / text el and check absent; tap background to deselect → absent.
+
+Potential issue: tapping element triggers onScaleStart via tap? GestureDetector onTap → sel=i. Fine.
+
+Also CollagePage initState _snap, fine.
+
+Text element kind 'text': tap on text.
+
+Also careful: `_element` uses AppImage → Image.file for photo; for clothes too.
+
+Let me now check the analyze job.
+
+4. Then run full test, analyze after, write report files, and diff patch containing only this task's files. Since T215 changes are uncommitted in the same files (collage_page.dart modified by T214 collage rotate?), the diff will include T215's changes to those files. Task says diff "只含本次改动的文件的 diff 加新文件" — i.e., files changed by this task (collage_page.dart, image_edit_page.dart, new test). Since those files contain prior uncommitted work, the diff must be per-file from HEAD (can't separate). T215 diff reportedly did the same. Let me check T215-diff.patch header to see approach.
+
+dsh: reasoning:
+Hmm, 140 issues now? The T215 baseline was 27. Maybe T214/T215 changes (uncommitted, plus new tests) added issues? Wait — 140 issues including errors in test/tryon_settings_test.dart. That's concerning. Maybe the analyzer is now analyzing generated files, e.g. `lib/utils/` untracked? No... Let's see the full output. There may be untracked files with many issues (e.g., apk dir? build dir?). Actually `flutter analyze` analyzes the whole package including maybe `.dart_tool`? Hmm.
+
+Wait — maybe it includes files like `original/`? No, that's repo root, not project.
+
+Let's get the full analyze output to a file and inspect distribution. Note flutter analyze exits 0? exit code 0 with error — odd, because tail. Anyway.
+
+Let me run analyze and save output.
+
+dsh: reasoning:
+Whoa — 140 issues now, whereas T215's baseline had 27. Something changed: maybe `.dart_tool` package config / pub get not run, causing unresolved imports (SharedPreferences undefined, lots of info?). Let's look at the output.
+
+dsh: reasoning:
+Deps aren't resolved now: need `flutter pub get`. That's why baseline 27 vs 140. Run `flutter pub get` — note pubspec.lock must not appear in diff; it's presumably gitignored or already tracked? Check git status for pubspec.lock.
+
+Let me run flutter pub get.
+
+dsh: reasoning:
+pubspec.lock is not tracked (git ls-files returned nothing) and not ignored? git check-ignore returned nothing too. Hmm but ls .dart_tool doesn't print pubspec.lock... the last line "pubspec.lock" is the output of git ls-files → so pubspec.lock IS tracked. Then check-ignore empty and ls-files printed pubspec.lock. Wait order: `ls .dart_tool`: flutter_build, hooks_runner, package_config.json, package_graph.json, version. Then git check-ignore -v pubspec.lock: nothing. Then git ls-files pubspec.lock: pubspec.lock. So it's tracked. Task says "pubspec.lock 不许出现在 diff 里" → so don't modify it. Let me inspect package_config.json to see if it's stale.
+
+dsh: reasoning:
+Need PUB_CACHE=/workspace/tools/pub-cache. Let's set env properly and rerun pub get (which may update pubspec.lock — check git status of lock; earlier `git ls-files pubspec.lock` printed nothing? Actually output was "pubspec.lock" from check-ignore? Let's re-check: two commands: `git check-ignore -v pubspec.lock` printed nothing; `git ls-files pubspec.lock` printed "pubspec.lock"? The output shows only "pubspec.lock" once. Hmm ambiguous. Check.
+
+dsh: reasoning:
+PUB_CACHE empty dir? `ls /workspace/tools/pub-cache` printed nothing. Hmm. Where are packages? .dart_tool/package_config.json points to paths — let's check where sqflite resolves.
+
+dsh: reasoning:
+The package_config.json points to /home/sandbox/.pub-cache — which is fine, but I overrode PUB_CACHE to /workspace/tools/pub-cache. The default HOME is probably /home/sandbox and PUB_CACHE unset → default ~/.pub-cache. So earlier analyze should have worked. Yet it reported uri_does_not_exist for sqflite. Hmm, maybe because I set PUB_CACHE=/workspace/tools/pub-cache? No — the first analyze run (bash-8) didn't set PUB_CACHE... but did it? The command exported only PATH, PUB_HOSTED_URL, NO_PROXY. So PUB_CACHE unset → ~/.pub-cache.
+
+But maybe HOME isn't /home/sandbox in the bash tool. Let me check env: whoami, HOME.
+
+Actually the package_config.json file was generated earlier by whoever ran pub get with HOME=/home/sandbox. Flutter analyze reading package_config with paths /home/sandbox/.pub-cache should work regardless of HOME... unless it's a sandbox restriction reading outside workspace. The file sandbox is danger-full-access now though. Hmm, but analyze was run under the same policy.
+
+Wait — maybe .dart_tool/package_config.json got wiped/regenerated by my `flutter pub get --offline` attempt just now. That attempt failed... it may have left package_config intact. But the first analyze (before pub get) already showed errors.
+
+Let me test directly: can I read /home/sandbox/.pub-cache?
+
+dsh: reasoning:
+So the project's packages (sqflite, image, image_picker etc.) exist in package_config but not in cache. So `flutter pub get` fails (no network to pub? maybe proxy exists). But analyze worked when .dart_tool/package_config exists — perhaps the earlier analyze run had stale package_config referencing those packages. Wait, analyze gave uri_does_not_exist for sqflite. Since package_config references /home/sandbox/.pub-cache/.../sqflite-2.4.5 which doesn't exist, analyzer reports uri_does_not_exist.
+
+Hmm but T215 analyze had 27 issues with no such errors, meaning T215's environment had those packages. Maybe the pub cache got mostly cleared. Let's check whether pub get can run online (localproxy at 127.0.0.1:3128). Let me test network to pub.flutter-io.cn.
+
+Actually note: prior report T215-analyze-before/after show only 27 issues and no errors — so dependencies were resolvable then. Possibly a different cache location: /workspace/tools/pub-cache? That listing errored ("Flutter assets will be downloaded..." then offline failure). Let's check /workspace/tools/pub-cache exists.
+
+Also maybe root has another pub cache at /root/.pub-cache or /workspace/.pub-cache. Let's search for sqflite dirs.
+
+dsh: reasoning:
+No packages installed anywhere; the .dart_tool/package_config.json references a cache that used to exist at /home/sandbox/.pub-cache (from image build) but packages were pruned. So analysis can't resolve dependencies → 132 errors.
+
+But T215's analyze-after shows 27 issues, so dependencies were resolvable then. Maybe there's a network-available pub mirror and we can `flutter pub get` online. Let's try online pub get (it modifies pubspec.lock potentially — but if resolution matches, pubspec.lock unchanged; if it changes, we must restore the lock file... but instructions say pubspec.lock must not appear in diff. We can back up pubspec.lock and restore after). Also .dart_tool is not tracked.
+
+Network: proxy at 127.0.0.1:3128 presumably started by env.sh. Let's try.
+
+dsh: reasoning:
+pub get succeeded and pubspec.lock is unchanged (git status showed nothing? Actually `git status --short pubspec.lock` output nothing printed after exit=0). Good.
+
+Now run analyze to get true baseline.
+
+dsh: reasoning:
+Baseline is 27 info, 0 warnings/errors. Matches task's baseline of 27 info.
+
+Let me save this as T216-analyze-before.txt (task doesn't require but useful). Now write the code.
+
+Also run baseline test to confirm 28 pass 1 fail. That takes time; start in background.
+
+First, let me write the code changes.
+
+collage_page.dart changes:
+1. `_El`: add `String? original;` ctor param, toJson 'o', fromJson.
+2. import image_edit_page.dart.
+3. `_crop()` method.
+4. toolbar conditional.
+
+Let me write _crop:
+
+```dart
+  /// 主动点「裁剪」才进裁剪页；取消（返回 null）时什么都不改。
+  Future<void> _crop() async {
+    final e = (sel != null && sel! < els.length) ? els[sel!] : null;
+    if (e == null || e.kind != 'photo' || e.image == null) return;
+    final src = e.original ?? e.image!;
+    final before = _json();
+    final r = await push<EditedImage>(context, ImageEditPage(path: ImageStore.abs(src), cropOnly: true));
+    if (!mounted || r == null) return;
+    setState(() {
+      // 第一次裁剪前记住原图，之后再裁都从完整原图开始。
+      e.original = src;
+      e.image = r.image;
+      _snap();
+    });
+    // 返回的图和撤销快照都不该是旧状态：_snap 必须在替换之后。
+  }
+```
+Hmm, `before` unused — remove. But requirement: "取消则什么都不变" — naturally.
+
+Note `use_build_context_synchronously` info: `await push(...)` then `if (!mounted) return;` before using context... we don't use context after await except setState. Should be fine. But analyzer may still flag `context` usage inside push? push happens before await.
+
+Careful: `_snap()` inside setState — existing code does that pattern. Fine.
+
+Also potential problem: crop result image is a new file; if user undoes, the file remains (harmless).
+
+Now image_edit_page.dart:
+- add `final bool cropOnly;` and ctor param.
+- `_load`: after `_setImage(b, push:false)`, if widget.cropOnly and mounted → setState(() => mode='crop').
+- `_applyCrop`: if cropOnly → after set image, `_saveAndPop()`.
+- `_saveAndPop`: save original + png, pop EditedImage.
+
+Actually for cropOnly, the "original" should be the source file path relative. In _next, original = ImageStore.saveOriginal(widget.path) which re-saves a copy — wasteful for cropOnly and creates new file. Better: for cropOnly return original as the relative path of widget.path if it is inside the store; otherwise saveOriginal. We can compute: `ImageStore.abs(rel)` → check if widget.path is under ImageStore.root; get relative. We can use `p.relative`? path package is imported in images.dart only. Simpler: add a helper in collage to just ignore r.original. Actually collage sets e.original = src itself, so the returned `original` field is not needed. So for cropOnly we can just save png and pop EditedImage(image, src-is-irrelevant, image). Simplest:
+
+```dart
+  Future<void> _applyCropAndPop() async {
+    setState(() => busy = true);
+    final r = Rect.fromLTRB(...);
+    final out = await compute(_crop, (cur!, [r.left, r.top, r.width, r.height]));
+    final image = await ImageStore.savePng(await compute(_toPng, out), 'img');
+    if (!mounted) return;
+    setState(() => busy = false);
+    Navigator.pop(context, EditedImage(image, widget.path, image));
+  }
+```
+But hold on: path must be relative for EditedImage.original convention? Callers: clothes_detail uses r.image/r.original as rel path for db. For cropOnly, no caller uses original except collage (which ignores). To be safe, make original = a rel path: compute relative if under root.
+
+Hmm, simpler and safe: in cropOnly mode pop with EditedImage(image, image, image)? That's odd. Task says "应用裁剪后直接 pop 返回 EditedImage（或返回图片路径）". So returning EditedImage(image, image, image) is acceptable but semantically "original" wrong. Let's do proper: since we're in cropOnly and the source is a collage photo, `original` can be the same source rel path passed in. Provide `widget.originalRel`? Adds complexity. 
+
+I could make ImageEditPage accept path as abs and compute rel via a new ImageStore helper... modifying services/images.dart is outside the allowed diff (red line: only collage_page.dart, image_edit_page.dart, new test). So no.
+
+Option: in collage, construct: 
+```dart
+final EditedImage? r = await push<EditedImage>(...)
+```
+and only use r.image. So set original = widget.path (abs) — it's unused. But that's sloppy. Alternative: return image path via pop with String? Task allows "或返回图片路径". But `push<EditedImage>` typed... Could pop a String and have collage use `push<Object?>`. Hmm, task explicitly says ImageEditPage 应用裁剪后直接 pop 返回 EditedImage（或返回图片路径）. Cleanest minimal: keep EditedImage, with original: `widget.path` is abs... risk if any other caller uses cropOnly later. I'll document with a comment: "cropOnly 下 original 直接回传传入的源路径（调用方负责），thumb 与 image 相同". Actually let me instead do: `EditedImage(image, image, image)`? Then a caller using original would get cropped image, losing original. Hmm.
+
+Think about what's most correct semantically: for cropOnly, this page only crops; the "original" is the source file. Since collage keeps its own `original` field, and I pass `src` rel in the widget... I could add a second optional param to ImageEditPage? Red line says "必要时可在 lib/pages/image_edit_page.dart 加一个可选构造参数（例如 cropOnly，默认 false...)" — "一个" optional param. Adding two might exceed. I'll keep one param and have cropOnly pop EditedImage where original = widget.path when it's inside ImageStore root converted to rel via string ops:
+
+```dart
+String _relOrAbs(String path) {
+  final root = ImageStore.root;
+  return path.startsWith(root) ? path.substring(root.length + 1) : path;
+}
+```
+ImageStore.root is accessible (static late String root). That's clean, no new imports. Use it for original. Good.
+
+Now _applyCrop in cropOnly:
+```dart
+  Future<void> _applyCrop() async {
+    setState(() => busy = true);
+    final r = Rect.fromLTRB(...);
+    final out = await compute(_crop, (cur!, [...]));
+    if (widget.cropOnly) {
+      final image = await ImageStore.savePng(await compute(_toPng, out), 'img');
+      if (!mounted) return;
+      setState(() => busy = false);
+      Navigator.pop(context, EditedImage(image, _asRel(widget.path), image));
+      return;
+    }
+    await _setImage(out);
+    setState(() { busy = false; mode=''; crop=...; });
+  }
+```
+Note for cropOnly we skip _setImage so page state isn't needed (we pop immediately).
+
+Also in cropOnly mode, the appBar back button pops null → cancel. Good. And the bottom bar in crop mode has a close (X) that sets mode='' → which in cropOnly would show the normal edit toolbar with 下一步. That breaks "不走下一步流程". Better: in cropOnly, the X in crop bar should pop null (cancel). Let's implement: crop bar close onPressed: `widget.cropOnly ? () => Navigator.pop(context) : () => setState(() => mode = '')`.
+
+Also `_load` sets mode='crop' after image loads.
+
+Also cropOnly should hide the undo action — mode != '' hides it anyway.
+
+Additionally, the initial crop rect is 0.05..0.95 which means default crop trims border. That's existing behavior; fine.
+
+Now the toolbar in collage: append `if (sel != null && sel! < els.length && els[sel!].kind == 'photo') _tool(Icons.crop, '裁剪', _crop),`. Need guard against index out of range after deletions. Use a helper getter:
+
+```dart
+_El? get _selEl => (sel != null && sel! >= 0 && sel! < els.length) ? els[sel!] : null;
+```
+
+Toolbar row currently has 5 Expanded tools; adding a 6th only when photo selected. Fine.
+
+Test file test/t216_collage_crop_test.dart:
+- _El is private, so can't access from test. Requirement: "_El 带/不带 'o' 的 JSON 往返". Since _El is private, test via public surface? Options: test CollagePage with canvasJson and interact. We can construct JSON with 'o' and without, push CollagePage(canvasJson: ...), then check UI (e.g., the element renders, and the crop button appears after selecting?). Selecting an element requires tapping the image... AppImage with image file. We could use a temp png file in ImageStore.root — ImageStore.root is late static; test could set ImageStore.root = tempdir. Hmm ImageStore.init uses path_provider.
+
+Simpler approach to test JSON round-trip: make `_El` accessible? Red line limits changes to collage_page.dart; making _El public (El) would be a bigger change and other files? `_El` used only there. Renaming to public would allow test. But task says "_El 带/不带 'o' 的 JSON 往返" test — implies testing via public API or by making it testable. Option: add `@visibleForTesting` exports? We can add a small public helper in collage_page.dart:
+
+```dart
+/// 供测试使用：El 的 JSON 往返（生产代码不用）。
+@visibleForTesting
+Map<String, dynamic> collageElRoundTrip(Map<String, dynamic> j) => _El.fromJson(Map<String, dynamic>.from(j)).toJson();
+```
+Hmm adding test-only API pollutes production. Alternative: test through CollagePage widget: give canvasJson containing a photo element with 'o', then verify... we can't read private state from test, but we can verify UI behavior: tap the photo element → crop button appears; then trigger crop? Crop opens a file picker path... We can set ImageStore.root to temp dir and write a png, so AppImage loads.
+
+For JSON round-trip verification, we can verify observable behavior: original preserved across save? Not accessible.
+
+Reasonable approach: test widget-level behavior which exercises fromJson/toJson indirectly, plus a JSON round-trip through the public `CollageResult`/`_json()`? `_json` is private too.
+
+Hmm. What about making `_El` → keep private but add a top-level testable function marked @visibleForTesting. That is acceptable and minimal, and satisfies "能做就做". I think a `@visibleForTesting` function is fine and honest. Actually, cleaner: expose a public class `CollageEl`? That's a rename of _El, affecting many references inside file only, plus copy in _more. Red line says only change collage_page.dart — a rename within that file is allowed but increases diff and risk.
+
+I'll add to collage_page.dart:
+
+```dart
+/// 测试用：把画布 JSON 里的一条元素读入再写出，验证 'o' 等键的往返。
+@visibleForTesting
+Map<String, dynamic> collageElToJson(Map<String, dynamic> j) => _El.fromJson(Map<String, dynamic>.from(j)).toJson();
+```
+
+`@visibleForTesting` comes from flutter/foundation, which material re-exports? material exports foundation. Yes, `package:flutter/material.dart` exports foundation, so visibleForTesting available.
+
+Test 1: JSON round trip with 'o' → toJson contains 'o' == value; without 'o' → no exception, 'o' null.
+Test 2: widget test for toolbar: build CollagePage with canvasJson containing photo element with image pointing to a temp file; ImageStore.root set so AppImage finds it; tap the element to select; expect find.text('裁剪') and Icons.crop. Then tap clothes/text canvas — for clothes, need kind 'clothes' with image; expect no '裁剪'. Also unselected: pump fresh page (sel null) → no 裁剪.
+
+Tapping the element: the element is an AppImage inside GestureDetector. `await tester.tap(find.byType(AppImage).first)`. But canvas element positions: x=0.5,y=0.5 defaults → center of canvas. Should be hittable in test window 800x600.
+
+Alternative simpler: since selection requires tap, we can do that.
+
+Careful: CollagePage imports outfit_form_page etc which import db → sqflite; in tests, importing db may be OK (just import, not init). Existing tests? screens_test imports app pages presumably. Check test dir & whether collage_rotate_test exists (T214 added it).
+
+Let me look at test/collage_rotate_test.dart for patterns.
+
+dsh: reasoning:
+ 
+
+dsh: reasoning:
+While the test runs, plan the code changes.
+
+Requirements:
+1. In collage page bottom toolbar, when selected element kind=='photo', show extra 「裁剪」 button (Icons.crop); not shown otherwise.
+2. On tap: push ImageEditPage with this photo, directly in crop mode (mode='crop'), user confirms → returns cropped image; replace element's image, keep position/scale/rotation, then _snap(). Cancel → nothing changes.
+3. _El gets optional field original (toJson key 'o', fromJson tolerant of missing 'o'), record original before first crop; subsequent crops open original. Copy element copies it too.
+4. ImageEditPage: add cropOnly param; when true, enter crop mode directly, after applying crop pop with EditedImage (or path), skip 下一步 flow.
+
+Design decisions:
+- ImageEditPage cropOnly: in initState after _load, set mode='crop'. Need `_load()` to also trigger crop mode. When cropOnly true, after `_applyCrop` should save the cropped png and pop with EditedImage. But _applyCrop currently sets image and mode=''. For cropOnly we want: apply crop → save png → pop.
+
+Actually simplest: cropOnly mode's check button calls _applyCropAndReturn: crop → save png (ImageStore.savePng(await compute(_toPng, out), 'img')) → pop EditedImage(image, original, thumb)? Task says "直接 pop 返回 EditedImage（或返回图片路径）". Returning EditedImage is convenient: we can use r.image as new relative path and r.original as absolute path of original? Careful: ImageStore.saveOriginal(widget.path) copies source into images dir and returns rel path. In collage we call ImageEditPage(path: ImageStore.abs(src)) where src is relative already in images dir. Then saveOriginal would duplicate the file. That's fine but wasteful. Better: for cropOnly pop a `String` relative path. But test may rely on EditedImage? My own test. Hmm, simpler and cleaner: have cropOnly pop `String` (relative image path) via Navigator.pop(context, image).
+
+But "取消则什么都不变" — close button in crop mode when cropOnly: currently close sets mode='' which would show the normal editor. For cropOnly, close should pop with null. I'll implement: in crop mode bottom bar, close handler: cropOnly ? Navigator.pop(context) : setState(() => mode='').
+
+Also "全图" button stays.
+
+AppBar in cropOnly mode: title 裁剪; maybe add a text "取消". Keep simple.
+
+Also when cropOnly, page should not show the usual bottom toolbar of 裁剪/擦除/抠图/下一步 — since mode='crop' at start, _bottom() returns crop bar. After applying, we pop immediately, so mode never returns to ''. But if user taps 全图 then check, pop with full image — fine.
+
+Need _applyCrop returns the Uint8List; then for cropOnly: save and pop.
+
+Implementation in _applyCrop:
+```dart
+Future<void> _applyCrop() async {
+  setState(() => busy = true);
+  final r = Rect.fromLTRB(...);
+  final out = await compute(_crop, (cur!, [r.left, r.top, r.width, r.height]));
+  if (widget.cropOnly) {
+    final rel = await ImageStore.savePng(out, 'img');  // out is png already
+    if (!mounted) return;
+    Navigator.pop(context, rel);
+    return;
+  }
+  ...
+}
+```
+Note `_crop` returns PNG bytes. So savePng(out, 'img') directly. 
+
+Also busy state: keep busy true while saving, then pop; fine.
+
+Wait: when pop, the collage will `await push<String>(...)`. Use push<String>? push helper: `Future<T?> push<T>(BuildContext context, Widget page)`.
+
+Also mode typing: mode is String, initial '' — cropOnly sets 'crop'.
+
+Init: in _load, after _setImage, `if (widget.cropOnly) setState(() => mode = 'crop');`. Since _load async, setState after await ok with mounted check. Actually _setImage does setState; add:
+```dart
+await _setImage(b, push: false);
+if (widget.cropOnly && mounted) setState(() => mode = 'crop');
+if (widget.autoCutout) _cutout();
+```
+
+Also for cropOnly, `original` for _El: in collage, before first crop, `e.original ??= e.image`. Then open ImageEditPage(path: ImageStore.abs(e.original!)).
+
+Now collage side:
+
+_El:
+```dart
+String? image;
+String? original; // 裁剪前原图
+...
+_El({..., this.original, ...});
+Map<String,dynamic> toJson() => {'k':kind,'i':image,'c':clothesId,'t':text,'col':color,'x':x,'y':y,'s':scale,'r':rot, if (original != null) 'o': original};
+```
+Hmm requirement "toJson 键 'o'，fromJson 兼容旧数据没有 'o' 的情况". Should key always be present? Test: "_El 带/不带 'o' 的 JSON 往返". Writing 'o': original always is fine too (null). But cleaner to always include 'o' key for stability? Including null adds noise to existing saved canvases (all elements would gain "o":null) — changes JSON history but fine. I'll include only when non-null to keep existing data byte-identical. Test roundtrip handles both.
+
+fromJson: `original: j['o']`.
+
+Note copy uses `_El.fromJson(els[sel!].toJson())` so original copied automatically. Good — but I should make the test check it.
+
+Toolbar: 
+```dart
+Row(children: [
+  _tool(Icons.checkroom, '单品', _addClothes),
+  _tool(Icons.photo_outlined, '照片', _addPhoto),
+  if (sel != null && els[sel!].kind == 'photo') _tool(Icons.crop, '裁剪', _cropPhoto),
+  _tool(Icons.text_fields, '文字', () => _editText()),
+  ...
+])
+```
+Careful sel index bounds. Add helper `_El? get selectedEl => (sel != null && sel! >= 0 && sel! < els.length) ? els[sel!] : null;`
+
+_cropPhoto:
+```dart
+Future<void> _cropPhoto() async {
+  final i = sel;
+  if (i == null || i < 0 || i >= els.length) return;
+  final e = els[i];
+  if (e.kind != 'photo' || e.image == null) return;
+  e.original ??= e.image;
+  final r = await push<String>(context, ImageEditPage(path: ImageStore.abs(e.original!), cropOnly: true));
+  if (r == null || r.isEmpty) return;
+  if (!mounted) return;
+  setState(() {
+    e.image = r;
+    _snap();
+  });
+}
+```
+Need import 'image_edit_page.dart'.
+
+Also careful: if element moved/removed during await... fine.
+
+Note: `e.original ??= e.image` mutates before user confirms; if canceled, the element now has original recorded — this is harmless (still same picture), but "取消则什么都不变" means image/undo stack unchanged. Adding 'o' changes _json snapshot vs history... _snap only called on change; the history entries remain. However, subsequent _snap() from another action will include 'o'. Slight semantic change but harmless. Still, cleaner: compute `final src = e.original ?? e.image;` and only assign original after success:
+```dart
+final src = e.original ?? e.image!;
+final r = await push(...ImageStore.abs(src)...);
+if (r == null) return;
+setState(() { e.original ??= src; e.image = r; _snap(); });
+```
+Good, cancel truly no change.
+
+Now widget test: need CollagePage with a photo element. Construct canvasJson with an element kind photo and image null? Toolbar shows 裁剪 only requires kind photo. To avoid file IO, image can be null, but AppImage(null) renders placeholder. But tapping 裁剪 would push ImageEditPage — the toolbar test only needs to check button presence, not tapping. But better also test that tapping pushes crop mode... that requires a real image file and ImageStore.root set. ImageStore.root is late static; AppImage uses ImageStore.abs only if rel non-empty. For the crop flow test, avoid.
+
+Widget test plan:
+- Build CollagePage(canvasJson: json of one photo element) → pump; tap on canvas element to select it? Selection happens via GestureDetector onTap on element. Finder: there are multiple GestureDetectors. Easier: `tester.tap(find.byType(AppImage))`? AppImage wrapped in Container in element stack. The element GestureDetector onTap selects. Tapping on AppImage's position should hit element's GestureDetector.
+
+Wait, photo element with image null → SizedBox with AppImage placeholder → tap works.
+
+Then expect find.byIcon(Icons.crop) findsOneWidget. Then tap canvas empty area to deselect (tap on the outer canvas GestureDetector...). Hmm tapping center may hit element since element at x=0.5,y=0.5. For deselect, tap at a corner of the canvas, e.g., `tester.tapAt(canvasRect.topLeft + Offset(10,10))`.
+
+Alternatively I set element x=0.2,y=0.2, tap there to select, tap at 0.8/0.8 to deselect.
+
+Test cases:
+1. _El JSON roundtrip with 'o' and without 'o' (pure unit).
+2. _El copy retains 'o' — but _El is private; copy is inside page. Can't access _El from test (library-private). Hmm! _El is private to collage_page.dart. Test file can't reference `_El`.
+
+Requirement: "test/t216_collage_crop_test.dart：_El 带/不带 'o' 的 JSON 往返". Since _El is private, test can't construct it directly... unless we test indirectly via CollagePage(canvasJson:) and inspect what it saves? Not accessible either.
+
+Options:
+a) Add a public helper in collage_page.dart for JSON round-trip? Red line: only change lib/pages/collage_page.dart — we can add a public top-level function `Map<String,dynamic> roundTripElJson(...)` — ugly.
+b) Since _El private, test via widget: build CollagePage with canvasJson containing 'o', then trigger something that re-serializes and compare. Hard.
+c) Make _El members accessible? Could rename to `CollageEl` public? That's a broader change but allowed within collage_page.dart. However requirement says "_El 增加可选字段 original" so keep name.
+d) Use `@visibleForTesting` public wrapper. E.g., in collage_page.dart add:
+```dart
+/// 仅用于测试：验证 _El 的 JSON 往返（私有类的可测入口）。
+Map<String, dynamic> debugRoundTripEl(Map<String, dynamic> j) => _El.fromJson(j).toJson();
+```
+That's acceptable and minimal. Red line says only改 collage_page.dart, 新增测试; adding a @visibleForTesting helper is within scope. But "新代码不得新增 info" — annotate with @visibleForTesting requires foundation import (material exports foundation? `package:flutter/material.dart` exports foundation, yes includes visibleForTesting? material exports foundation.dart which includes meta's visibleForTesting? `@visibleForTesting` comes from package:meta re-exported by foundation. Yes foundation exports meta annotations).
+
+Alternatively test by reading actual widget state via `tester.state<...>` — private state class, cannot type it. Could use dynamic: `final state = tester.state(find.byType(CollagePage)) as dynamic; state.els` — private members via dynamic won't work cross-library (noSuchMethod since private names are library-mangled). Dynamic access to `els` public field name... `els` is public field on private class; dynamic dispatch uses name symbol `els` which is public → works? Private class `_CollagePageState` but field `els` name is public, dynamic invoke of getter `els` compiles to `Symbol('els')` — that works at runtime because the getter's name is `els`. Yes dynamic calls with public names work.
+
+But state type is private; `tester.state<State<CollagePage>>(find.byType(CollagePage))`? Hmm `tester.state` requires a type: `tester.state<State<CollagePage>>(...)` returns State<CollagePage> but actual object is _CollagePageState which is a subtype — generic cast works? `tester.state<T extends State<StatefulWidget>>(finder)` does `finder.evaluate().single.state as T`. Cast to `State<CollagePage>` succeeds. Then dynamic access `(state as dynamic).els` works if getter `els` is public. Then els elements are _El with private type; accessing `e.image` via dynamic also public name → works. And `toJson()` public method → works! So we can do JSON roundtrip test through the page's state dump:
+
+```dart
+final state = tester.state<State<CollagePage>>(find.byType(CollagePage)) as dynamic;
+final json = (state.els.first as dynamic).toJson() as Map<String,dynamic>;
+```
+That tests toJson includes 'o'. For fromJson with/without 'o', build CollagePage(canvasJson: ...) and inspect state.els.first.original via dynamic.
+
+Hmm, dynamic on private classes: accessing public members is fine. But `e.original` where field declared `String? original` — getter name 'original' public. Fine.
+
+That's hacky but avoids adding test hooks. However analyzer: `as dynamic` then calling `.toJson()` → no static type checking, no info added. Acceptable? It's a test file; risky but works.
+
+Alternatively simpler: add a small public API in collage_page.dart:
+```dart
+@visibleForTesting
+Map<String, dynamic> collageElToJson(_El e) => e.toJson();
+```
+Still needs _El instances. 
+
+Better public approach: add `@visibleForTesting Map<String,dynamic> decodeEncodeElJson(Map<String,dynamic> j)`. Two lines, explicit, stable. I prefer this — cleaner than dynamic hacks. But does it count as "只改 collage_page.dart" — yes.
+
+Hmm, but a production helper only for tests is slightly smelly. Yet common pattern. Alternatively make the field test through `_El.toJson` by making `_El` non-private? Requirement literally names `_El`, keep.
+
+I'll add:
+```dart
+/// 仅供测试：验证 [_El] 的 JSON 往返（含可选字段 'o'）。
+@visibleForTesting
+Map<String, dynamic> elJsonRoundTrip(Map<String, dynamic> src) => _El.fromJson(Map<String, dynamic>.from(src)).toJson();
+```
+
+Then test:
+- roundtrip without 'o': map without 'o' → out shouldn't contain 'o' (or out['o'] == null); and out['i'] etc preserved.
+- roundtrip with 'o': out['o'] == value.
+
+Also widget toolbar tests:
+- photo selected → crop icon exists; text '裁剪' exists.
+- clothes selected → no crop icon.
+- text selected → no crop icon.
+- no selection → no crop icon.
+
+Selection by tapping element. For kind clothes with image null → AppImage placeholder. Need clothesId maybe. Fine.
+
+For text element: Text widget rendered.
+
+Let me also test crop flow end-to-end? Optional: tapping 裁剪 pushes ImageEditPage cropOnly and cancel returns nothing → image unchanged. That needs a real image file + ImageStore.root. ImageStore.root is `static late String root` — settable in test: `ImageStore.root = tempDir.path;`. Then a photo rel path pointing to an existing file... AppImage uses Image.file → in widget tests, Image.file works with real file via runAsync? Loading images in tests requires decoding; use `tester.runAsync`. Could be flaky.
+
+A simpler flow test: tap 裁剪 with an element whose image file exists, pump, expect ImageEditPage in crop mode showing the white border. That verifies cropOnly directly enters crop mode — valuable for requirement 4, and similar to t215 test helper. Let's attempt: create temp dir, set ImageStore.root, write a 200x200 png, canvasJson photo element with image 'a.png'. Tap element to select, tap crop icon, pump with runAsync until Image widget appears, expect white border container (crop mode), also expect find.text('下一步') findsNothing (cropOnly doesn't show 下一步).
+
+But careful: after cancel (tap close icon) mode... assert returns to collage unchanged. Might be doable but need pop handling. Keep it as a second test maybe. Risk of flakiness/time. I'll try; if flaky, drop and document.
+
+Also need to ensure test file doesn't affect app tests count.
+
+Let me write code now. Check the test baseline job.
+
+dsh: reasoning:
+Baseline: 28 pass, 1 fail (screens_test fonts) — matches task.
+
+Now implement. Design:
+
+collage_page.dart:
+- `_El` gets `String? original` with json key 'o'.
+- Add `_cropPhoto()`:
+```dart
+Future<void> _cropPhoto() async {
+  if (sel == null) return;
+  final e = els[sel!];
+  if (e.kind != 'photo' || e.image == null) return;
+  final src = e.original ?? e.image!;
+  final r = await push<String>(context, ImageEditPage(path: ImageStore.abs(src), cropOnly: true));
+  if (r == null) return;
+  setState(() {
+    e.original ??= src == e.image ? src : e.image;   // hmm
+    e.image = r;
+    _snap();
+  });
+}
+```
+Wait: first crop, original should be the un-cropped image = current e.image (since no original yet). src = e.original ?? e.image. So set e.original ??= e.image (before replacing). Then e.image = r.
+
+But careful: `src` computed before, so original = e.image (pre-change). Do:
+```dart
+final e = els[sel!];
+final img = e.image!;
+final src = e.original ?? img;
+final r = await push<String>(...);
+if (r == null || r == src) return;
+setState(() {
+  e.original ??= img;
+  e.image = r;
+  _snap();
+});
+```
+Hmm, if r == img (full-image crop), still fine to snap; but skip if identical? Task says replacing image then _snap. If crop = full image, returned path differs but same pixels. Keep simple: always apply.
+
+What does cropOnly ImageEditPage return? Task says "应用裁剪后直接 pop 返回 EditedImage（或返回图片路径）". Simpler: return image path String (relative rel from ImageStore). But EditedImage imports would be needed; return String is simpler for the collage. But careful about type: `push<String>`. I'll return the relative image path string saved via ImageStore.savePng. Actually to keep the collage self-consistent, return `EditedImage`? String is cleaner. But then callers must handle. cropOnly is only used by collage. Hmm, a caller could use cropOnly generically. I'll return String (rel path) and document it.
+
+Need a public accessor to know cropOnly pops with String. Fine.
+
+In ImageEditPage:
+- add `final bool cropOnly;` constructor param default false.
+- in _load, after loading: if cropOnly set mode='crop' initially. But mode is set in setState... `_setImage(b, push:false)` then `setState(() => mode = 'crop')`. Actually set initial mode in initState? mode = 'crop' before image loaded is fine — build shows loading spinner until cur != null, then overlay appears. Simpler: `String mode = ''` but in initState: if widget.cropOnly mode = 'crop'. But AppBar title shows 裁剪. Good.
+
+But careful: cropOnly means no cancel-to-empty; the close (X) button in crop mode currently sets mode='' which would leave user in edit page with 裁剪/擦除/抠图 tools. For cropOnly, the X should pop (cancel). And the check should apply crop and pop with image path.
+
+Also the AppBar back button naturally pops -> null => 取消不变. Good.
+
+Implement in `_bottom()` crop branch:
+```dart
+if (mode == 'crop') {
+  return Padding(... Row(
+    IconButton(icon: const Icon(Icons.close), onPressed: () {
+      if (widget.cropOnly) { Navigator.pop(context); return; }
+      setState(() => mode = '');
+    }),
+    TextButton(全图, ...),
+    const Text('裁剪' ...),
+    IconButton(icon check, onPressed: busy ? null : _applyCrop),
+  ));
+}
+```
+And `_applyCrop`:
+```dart
+Future<void> _applyCrop() async {
+  setState(() => busy = true);
+  final r = ...;
+  final out = await compute(_crop, ...);
+  if (widget.cropOnly) {
+    final image = await ImageStore.savePng(await compute(_toPng, out), 'crop');
+    if (!mounted) return;
+    Navigator.pop(context, image);
+    return;
+  }
+  await _setImage(out);
+  ...
+}
+```
+Note out from _crop is already PNG bytes; `_toPng` re-encodes — unnecessary. Just savePng(out,'crop'). Keep simple.
+
+Busy indicator: while computing, show spinner. Since we pop right away, fine.
+
+Should cropOnly also hide other UI? Since mode=='crop' always and closing pops, user can't reach the tool row. Good.
+
+Also for cropOnly, the "全图" (full image) button gives crop rect full → full image. Keep.
+
+Also initial crop rect is 0.05..0.95 (inset). For cropOnly started fresh that's fine — user adjusts.
+
+Another consideration: `_load` error path pops. Fine.
+
+Now toolbar c: add crop button conditionally. The task: "当选中的元素是 kind=='photo' 时，多出一个「裁剪」按钮（Icons.crop）；没选中照片时不显示". Where to put it? In the row of _tool. I'll insert after 照片: `if (sel != null && els[sel!].kind == 'photo') _tool(Icons.crop, '裁剪', _cropPhoto),`. Careful sel index bounds: sel set to index; restored/removals set null. But history restore sets sel=null. Deleting sets sel=null. Fine. Still guard `sel! < els.length`.
+
+Add getter:
+```dart
+bool get _photoSelected => sel != null && sel! < els.length && els[sel!].kind == 'photo';
+```
+But since it's used in build and setState triggers rebuild, fine. However widget tests need to check the button appears. Also test: selecting photo — need to simulate selecting element; a widget test can pump CollagePage with canvasJson containing a photo element, tap the element, then toolbar shows 裁剪. That's doable but the element uses AppImage -> Image.file which in test will errorBuilder fallback (fine). And ImagePicker import — fine.
+
+Actually tapping the element: GestureDetector onTap sets sel. Positioned at x,y center. The AppImage with rel path nonexistent -> errorBuilder placeholder. Should be tappable. Let's write widget test: pump CollagePage(canvasJson: ...) inside MaterialApp, then tap at position. Hmm finding the element: find.byType(GestureDetector) many. Better: use `find.byWidgetPredicate((w) => w is AppImage)`. Tapping AppImage center should hit the GestureDetector. But clipping/position: element positioned at 0.5,0.5 in canvas. Should be hittable.
+
+Alternatively expose a helper for testability? Task says test "选中 photo 时工具栏出现「裁剪」、选中 clothes/文字或未选中时不出现（能做 widget 测试就做，做不了写明原因）". Widget test through UI tap is the honest way. Let's try.
+
+Also _El JSON round-trip test: _El is private. Test can't access `_El` from outside. Hmm. Options: the test can go through CollagePage's _json/_restore? Those are private too. Alternative: the test can construct CollagePage with canvasJson containing 'o' and verify via... hmm need observable behavior.
+
+Options:
+1. Make _El public? Red line says only modify collage_page.dart — making _El public (rename to CollageEl) would change more. Better: keep _El private but add a small public helper in collage_page.dart for testing JSON round-trip, e.g. a top-level function `String collageElJson(...)`? That adds public API.
+
+Hmm, could test through the CollagePage widget: pass canvasJson with els containing 'o' and check that after selecting photo and pressing crop, ImageEditPage opens with path = original. That's a good behavioral test but requires ImageEditPage navigation which loads File... doable with runAsync.
+
+Simpler: expose a tiny public top-level function in collage_page.dart like:
+```dart
+/// 供测试使用：元素 JSON 往返（保留 original / 'o'）。
+String collageCanvasJsonRoundTrip(String json) ...
+```
+That's a hack-ish public API. Alternative: use `@visibleForTesting` public class? Dart privacy is per-library, so a test cannot access _El.
+
+I think a reasonable approach: since test file can import the library, and `_El` is private, add a top-level function with @visibleForTesting:
+
+```dart
+/// 仅供测试：把画布 JSON 解析后再序列化，验证 _El 的字段兼容性。
+@visibleForTesting
+String collageJsonRoundTrip(String canvasJson) {
+  final m = jsonDecode(canvasJson) as Map<String, dynamic>;
+  final els = (m['els'] as List).map((e) => _El.fromJson(Map<String, dynamic>.from(e)));
+  return jsonEncode({'els': els.map((e) => e.toJson()).toList(), 'bg': m['bg'], 'bgImage': m['bgImage']});
+}
+```
+Needs `import 'package:flutter/foundation.dart'`? `@visibleForTesting` comes from meta via foundation. collage_page imports material which exports foundation? material exports foundation.dart? `package:flutter/material.dart` exports widgets which exports foundation. Yes, @visibleForTesting is available via foundation, and material exports foundation. Should be OK.
+
+Hmm but adding public API to lib for tests is slightly smelly but acceptable and keeps red lines. Actually another alternative: test the round-trip via a real behavior: build CollagePage with canvasJson containing 'o', do nothing, and... no way to read back.
+
+Wait — widget test can verify round trip through undo history? No access.
+
+Alternatively, test that after opening a collage with 'o' and pressing crop... eh.
+
+Another idea: `CollageResult` returned by _done contains canvas JSON string — public! If widget test can press the check button and capture the CollageResult via returnResult... but _done requires rendering toImage which works in widget tests? RepaintBoundary.toImage works in tests (needs ImageStore.root init though, saving PNG files). Too heavy.
+
+I'll go with @visibleForTesting helper — pragmatic, honest, documented.
+
+Actually, wait: maybe simplest and most natural: keep test on the helper, plus a widget test for the toolbar. Let's do that.
+
+Also "复制元素时一并复制" — copy uses `_El.fromJson(els[sel!].toJson())`, which automatically includes 'o'. Good — no change needed, but test could verify via... covered indirectly.
+
+Now also consider: the toolbar row currently has 5 tools in a Row with Expanded. Adding a 6th when a photo is selected will shrink others — acceptable. Alternatively put the 裁剪 button in the same row. Task says "多出一个「裁剪」按钮" in the _tool row. Fine.
+
+Order: 单品/照片/裁剪/文字/背景/更多? I'll put 裁剪 right after 照片 (contextually near photo) — visible and logical.
+
+Also maybe put it at end to avoid layout jumps? Task doesn't specify. I'll put after 照片.
+
+Now implement edits.
+
+For image_edit_page: also `_load` normalizes bytes via compute. For cropOnly, widget.path may be an absolute path of original — fine.
+
+Potential info lint: `use_build_context_synchronously` — in _applyCrop I use Navigator after await; need `if (!mounted) return;`. The existing _next does that. Check `_applyCrop` new code path.
+
+Let's write the code.
+
+Also for collage `_cropPhoto` uses context after await? `push` before await; after await use setState — no context usage except inside push. Use `if (!mounted) return;` anyway.
+
+Also potential analyzer info: unused import? no.
+
+Let me apply edits.
+
+dsh: reasoning:
+Wait: `@visibleForTesting` requires `package:flutter/foundation.dart` import — material exports foundation, so `visibleForTesting` is available via material. Yes, material exports foundation.
+
+Now the crop action + toolbar.
+
+Need ImageEditPage import.
+
+Also `_startScale` used inside _element — check it's used. Yes at onScaleStart. Actually there might be a missing one. Let me grep.
+
+dsh: reasoning:
+`_startScale` is used in _element. I'll name my field differently: `_handleBase` / `_handleRotBase`. Actually simpler: rename to `_pinchBase` and `_pinchRot`.
+
+Now add the crop functionality.
+
+dsh: reasoning:
+Now imports: need EditedImage from image_edit_page.dart, plus @visibleForTesting from foundation. collage_rotate uses `Offset` — apparently flutter material export? It's from dart:ui via material? Offset is in dart:ui, exported by flutter/material? material exports painting which exports dart:ui's basic types. Yes, `Offset` is exported.
+
+Add imports: `import 'package:flutter/foundation.dart';` for visibleForTesting — but that might conflict? foundation is exported by material already, so `@visibleForTesting` is available via material? material.dart exports foundation? material exports widgets which exports foundation → yes `visibleForTesting` should be available. Actually widgets.dart exports 'package:flutter/foundation.dart'. Yes. So no import needed. But is it currently used? Let's just try analyzing.
+
+Also imports: `import 'image_edit_page.dart';` for ImageEditPage/EditedImage.
+
+Also _more copy: `_El.fromJson(els[sel!].toJson())` — toJson now includes 'o', fromJson reads 'o', so copy carries original. Good.
+
+Note the `_restore` and _json also roundtrip ok.
+
+But careful: copy of a photo element copies original too — required by spec item 3.
+
+Now the cropping of clone: fine.
+
+Also check `_El.fromJson` in initState for old data with no 'o' → null. Good.
+
+One issue: toJson now always writes 'o': null. That's fine ("toJson 键 'o'"). Old data compatibility handled.
+
+Now image_edit_page cropOnly.
+
+dsh: reasoning:
+Now in initState, set mode='crop' when cropOnly. Loading needs to finish first (cur). We can set mode='crop' immediately in initState (crop overlay only shows when cur != null). That's fine.
+
+Then _applyCrop: if widget.cropOnly -> after cropping, save and pop with EditedImage. Need to save the cropped png via ImageStore.savePng, and also original? For collage use, only r.image used. But EditedImage requires image, original, thumb. We'll save png as image, original = widget.path relative? In _next it does ImageStore.saveOriginal(widget.path) which re-saves. For cropOnly, cheap: original = existing rel path if widget.path is inside ImageStore root, else saveOriginal. Simpler: thumb not needed; but constructor requires. Let's create thumbnails? That costs. Better add a helper: cropOnly path returns EditedImage(image, original, '' ) — thumb empty string. Check Thumb usage elsewhere—callers of ImageEditPage with newClothes=false: clothes_detail_page and clothes_form_page use r.original/image/thumb. Our cropOnly return only consumed by collage. But thumb='' could break something if misused. Fine but let's compute properly with makeThumb — that's extra IO (resize). Cheap enough for a photo. Actually keep it simple and robust: build thumb via ImageStore.makeThumb(image). It's one resize of at most 1600px → fine.
+
+Also for cropOnly, the crop mode "close"(取消) button currently sets mode='' which would dump the user into full editor. For cropOnly, close should pop the page (nothing changed). Let's handle: onPressed: widget.cropOnly ? () => Navigator.pop(context) : () => setState(mode='').
+
+Also in crop mode the "全图" button sets crop full. Fine.
+
+The _applyCrop in cropOnly should pop directly. Let's write:
+
+```dart
+Future<void> _applyCrop() async {
+  setState(() => busy = true);
+  final r = Rect.fromLTRB(...);
+  final out = await compute(_crop, (cur!, [r.left, r.top, r.width, r.height]));
+  if (widget.cropOnly) {
+    final image = await ImageStore.savePng(await compute(_toPng, out), 'img');
+    final thumb = await ImageStore.makeThumb(image);
+    final original = await _originalRel();
+    if (!mounted) return;
+    setState(() => busy = false);
+    Navigator.pop(context, EditedImage(image, original, thumb));
+    return;
+  }
+  ...
+}
+```
+
+_originalRel: widget.path may already be inside ImageStore.root (collage passes ImageStore.abs(rel)). Compute: final absRoot = ImageStore.root; if path startsWith root -> relative via p.relative? images.dart imports path as p but image_edit_page doesn't. Use simple substring: ImageStore.abs(rel) = p.join(root, rel) = "$root/$rel". So:
+
+```dart
+Future<String> _originalRel() async {
+  final root = ImageStore.root;
+  if (widget.path.startsWith('$root/')) return widget.path.substring(root.length + 1);
+  return ImageStore.saveOriginal(widget.path);
+}
+```
+That avoids re-encoding. ImageStore.root is a directory path (getApplicationDocumentsDirectory/images). Good.
+
+Careful: normalize in _load resizes to 1600 and bakes orientation; cropOnly original stays original file - good, full original for re-cropping.
+
+Also the AppBar title: mode=='crop' → '裁剪'. Good.
+
+In crop mode with cropOnly, the bottom row: close button pop, 全图, '裁剪', check. Good, that's already T215 UI.
+
+Now mode init. initState: `mode = widget.cropOnly ? 'crop' : '';` But crop overlay requires cur loaded; shows spinner. Fine.
+
+Hmm—one concern: T215 test taps find.byIcon(Icons.crop) in normal mode. Unaffected.
+
+Another concern: in cropOnly mode, after entering, the undo action shown only when mode==''. fine.
+
+Additionally for cropOnly, maybe the AppBar back button pops → returns null → collage does nothing. Good.
+
+Let's implement.
+
+dsh: reasoning:
+Now the crop bottom bar: in cropOnly mode, the close button should pop the page (cancel), and label perhaps "取消". TextButton 全图 stays. The check icon applies and pops. Let's modify the crop bottom bar for cropOnly: replace the close IconButton onPressed with Navigator.pop(context) (cancel returns null). Also add tooltip '取消'. Keep normal behaviour when not cropOnly (mode='').
+
+Also the appBar: in cropOnly mode title '裁剪' fine. Also there's no back-to-tools path; if user taps system back, returns null = cancel. Good.
+
+Also `_next` isn't reachable in cropOnly.
+
+Let me edit the crop bottom row.
+
+dsh: reasoning:
+Wait — in `_popCropped`, `EditedImage(image, widget.path, thumb)`: widget.path is an absolute path, whereas collage's `original` field is expected to be a relative path (ImageStore relative). Actually collage sets `e.original ??= e.image` (already relative) so it doesn't use r.original. That's fine. But better to pass widget.path as absolute — hmm, `EditedImage.original` semantic is relative path (used by clothes form to store originalImage). If cropOnly path passed, it's an absolute path, which could confuse. But collage ignores it. To keep it clean, let me not worry; but safest: original should be relative. We could compute relative: if widget.path is under ImageStore.root, strip. Actually collage's _cropPhoto uses `e.original ?? e.image` and ignores r.original. So r.original value doesn't matter for collage. But other potential callers? cropOnly only used by collage. Better to make it meaningful: pass the relative path if under root, else widget.path. Let me keep simpler: `EditedImage(image, widget.path, thumb)` and note in comment. Hmm, but a test might check. I'll improve: derive relative.
+
+Actually cleaner: since collage keeps its own original tracking, the cropOnly return can just carry widget.path. I'll leave as is but adjust the comment. Actually to avoid confusion I'll add helper in ImageStore? No — minimal. Leave.
+
+Also there's an issue: `mode = widget.cropOnly ? 'crop' : ''` set in initState directly on field before _load; fine.
+
+Also `if (widget.autoCutout) _cutout();` in _load - with cropOnly, autoCutout false.
+
+Wait one more problem: in cropOnly mode, after cropping the pop returns. But undoStack: _setImage(out) pushes cur to undo. Fine.
+
+Now, potential problem: `_load` failure path calls Navigator.pop(context) - fine.
+
+Now build. Let me run analyze for these two files.
+
+dsh: reasoning:
+Something broke — likely the extra `@override` insertion or brace mismatch. Let's look around line 470-500.
+
+dsh: reasoning:
+The code looks fine here. Errors at 540+, 570. Let me look at 505-570.
+
+dsh: reasoning:
+Structure looks fine. Why undefined identifiers like canvasKey? Maybe the _Element function got detached because of a missing brace earlier — near `_tool` there's `Widget _tool` fine. Errors at line 540 etc. Possibly the class closing brace is misplaced: earlier maybe my edit inserted a method after the class ended? Let me check line numbers of key definitions.
+
+Actually error "Undefined name 'canvasKey'" at 540 suggests those usages are outside the State class. Maybe an extra `}` was introduced before `Widget _element`? Let me view lines 355-460 region with brace counting.
+
+dsh: reasoning:
+Structure looks fine... but errors at line 540 etc. Maybe `_element` is malformed with missing braces after my import edit? Let's re-analyze with only collage file and view all errors.
+
+Wait errors listed: line 540 canvasKey undefined, 545 setState undefined... These suggest the class closed early. Possibly `_cropPhoto` insertion broke... no. Let's look for a stray `}`. Actually the `_selectedPhoto` getter—check.
+
+Hmm, maybe my python no-op write? That was a no-op replace.
+
+Let's run dart analyze on just this file to see first errors.
+
+dsh: reasoning:
+The `_selectedPhoto` getter insertion broke something? Line 76... let me look at 76-130.
+
+dsh: reasoning:
+Looks fine here. Line 76 is `class _CollagePageState extends State<CollagePage> {`. Missing concrete build → meaning build() got swallowed/moved? Let's inspect around `_cropPhoto` (line 165).
+
+dsh: reasoning:
+The `Future<void> _editText([_El? e]) async {` line got replaced. Restore it.
+
+dsh: reasoning:
+Good: only the 2 pre-existing infos in image_edit_page (baseline had image_edit_page: 2 issues — unnecessary_import line 3 and use_build_context line 90→now 96). Same count. 
+
+collage_page has 5 issues at baseline? Earlier distribution said collage_page 5 (all errors due to missing package). After pub get, baseline 27 infos — collage_page wasn't in the 27 list? Let me check /tmp/analyze_before.txt for collage_page. The 27 list didn't include collage_page. So collage_page has 0 issues at baseline. Now 0 issues. 
+
+Now update `_el` copy — copy uses `_El.fromJson(els[sel!].toJson())` which includes 'o' automatically. Good.
+
+Also need `@visibleForTesting` — requires flutter/foundation import. collage_page imports material which exports foundation's visibleForTesting? material.dart exports foundation.dart, yes `@visibleForTesting` is available via package:flutter/material.dart.
+
+Now consider: toolbar crop only when photo selected. Test: widget test for CollagePage with canvasJson containing photo, tap element to select, check toolbar has 裁剪. But collage page uses AppImage with Image.file — in widget tests file may not exist, errorBuilder handles. Also initState doesn't need DB. ImagePicker only on tap.
+
+Let me write the test file.
+
+Also, potential subtlety: `_El.fromJson` with missing 'o' → `j['o'] as String?` fine.
+
+Test items:
+1. JSON roundtrip with 'o' and without.
+2. Widget test: photo selected → crop button appears; clothes selected → not; text selected → not; nothing selected → not.
+
+For widget test of CollagePage, need MediaQuery size; default test window 800x600. LayoutBuilder ok.
+
+Tapping element: find by... elements rendered via AppImage. For photo, kind photo → SizedBox with AppImage. To select we tap on the positioned element. Simpler: use `find.byType(AppImage)` maybe multiple. Alternative approach: give each element a key? That would be a small change to collage_page. Hmm, we could use `Key('el_$i')`? But red lines say minimal changes; adding keys is fine but not needed. We can tap by finding GestureDetector with onScaleStart? There are many.
+
+Better: find the widget of AppImage inside element and tap it. `find.byType(AppImage)` — AppImage appears for bgImage only if bgImage set, and in elements. So with one photo element and no bgImage, findsOneWidget. Tap it, then pump; toolbar should show 裁剪.
+
+For clothes: need image path? AppImage with rel 'x.jpg' that doesn't exist → errorBuilder shows placeholder icon; still tappable area. Fine.
+
+For text: Text widget '你好'.
+
+Canvas JSON structure: {'els':[...], 'bg':[4294967295], 'bgImage':null}.
+
+Note: `_snap` in initState fine.
+
+Let me also verify that tapping the element sets sel via onTap of GestureDetector wrapping. Since it's inside Transform.rotate, tap works.
+
+Let me write the test and run.
+
+Also test that ImageEditPage cropOnly starts in crop mode: could add test verifying that with cropOnly:true, crop border appears without tapping crop icon, and '下一步' button not present. That's valuable. Use same approach as t215 test (runAsync loop). But note ImageEditPage calls ImageStore.savePng only on apply; opening just needs file read + decode; ImageStore.root not needed for reading absolute path (path passed is absolute). Good for widget test.
+
+Let me write tests.
+
+dsh: reasoning:
+Now write tests. Need widget tests for toolbar crop visibility. Problem: CollagePage's initState reads canvasJson and builds a canvas; _El.fromJson etc. Building CollagePage widget requires AppImage, Image.file which may fail to load but has errorBuilder. For a photo element we need image path rel; ImageStore.abs uses ImageStore.root which is late and not initialized → LateInitializationError when building AppImage for photo elements. Hmm — AppImage calls ImageStore.abs(rel!), which uses root. In tests root is not set. That'd throw.
+
+Also the toolbar `_tool` row needs a selected element. Selection: tap on element via GestureDetector's onTap. But for widget test we can tap on the element area. Alternatively find the "裁剪" text.
+
+Options:
+1. In widget test, initialize ImageStore.root via a temp dir (ImageStore.root = tmp path). That's assignable (static late String root). Then AppImage will use Image.file, which in tests errors → errorBuilder placeholder. Good, no need for actual file? Image.file with nonexistent file triggers errorBuilder asynchronously; test pump may be ok.
+
+2. canvasJson with an element kind 'photo' image null → AppImage(null) gives placeholder. That's fine and avoids ImageStore. And tapping element selects it. For clothes kind, image null too. For text, text.
+
+But tapping on element: GestureDetector onTap sets sel. Element positioned at e.x*width etc. We can tap find by text for text element; for photo, find widgets... Use tester.tapAt center of canvas (element default x=0.5,y=0.5) - but canvas tap sets sel=null on outer GestureDetector; child tap should win (inner gesture wins over outer? Both tap recognizers, inner takes precedence in arena since... Actually both are tap gestures; the innermost wins the arena? Gesture arena: tap recognizer that is deeper in hit test path is first added, and when pointer up, both compete; the first in the arena list wins the arena (the deepest). Yes inner wins).
+
+Careful: for photo there's a trash overlay etc. Fine.
+
+Let me write test file with:
+- JSON round trip tests using collageJsonRoundTrip public function.
+- Widget tests: pump CollagePage(canvasJson: ...) within MaterialApp with a theme maybe. Then check toolbar: 期待 '裁剪' 不出现 initially; tap photo element → '裁剪' 出现; tap empty area to deselect → 消失; tap clothes element → 不出现; tap text → 不出现.
+
+Need to also verify crop opens ImageEditPage in crop mode? Could do, but ImageEditPage loads file via compute — heavy. A cropOnly test in t216? Task says tests: _El JSON round trip; toolbar visibility. Optional. I'll add a test that tapping 裁剪 pushes ImageEditPage with cropOnly — can check by finding ImageEditPage widget after tap. That requires file read; ImageStore.abs requires root; we can set ImageStore.root to temp dir and create a real png file. Then ImageEditPage._load will fail decode? We can write a valid png. Use img package? test deps include image. Then pump and check `find.byType(ImageEditPage)` and widget.cropOnly == true. Good and cheap (don't need to wait for decode).
+
+But ImageStore.root mutation is global; setting it in test is fine.
+
+For the widget test with photo element, we need text and clothes elements too. Let's design canvasJson:
+
+{"els":[
+ {"k":"photo","i":null,"c":null,"t":"","col":-16777216,"x":0.25,"y":0.5,"s":1,"r":0},
+ {"k":"clothes","i":null,"c":1,"x":0.5,"y":0.5,"s":1,"r":0},
+ {"k":"text","t":"你好","col":-16777216,"x":0.75,"y":0.5,"s":1,"r":0}
+],"bg":[4294967295],"bgImage":null}
+
+Note fromJson requires x,y,s,r as num. ok.
+
+Tapping by position: canvas size computed from LayoutBuilder: w = maxWidth-24, h = w*4/3 capped. In a test window 800x600 by default. Body height = 600-appbar(56)-toolbar. Hmm easier: find element widget by key? No keys. Use find.byType(AppImage) etc. But three elements. Could tap at specific global coordinates computed from canvasKey? Not exposed.
+
+Alternative: use `find.byWidgetPredicate` to locate GestureDetector with onTap + onScaleStart (element gesture) — there are 3, order corresponds to els. tester.tap(find.byWidget(...).at(0)). That's robust.
+
+For text element, it's the same widget type. Good: element gesture detectors have onScaleStart != null. Are there others? The crop page no. So find all GestureDetectors with onScaleStart != null → 3.
+
+Careful: after tap photo, toolbar gains crop, layout shifts widths, but element find order remains.
+
+Also element tap may trigger dragging etc. Fine.
+
+Let me verify ImageStore usage when image null: AppImage(null) → placeholder, no ImageStore call. Good, so root not needed except crop push test.
+
+For crop push test: photo element image null → _cropPhoto returns early (src null). So give photo an image rel like 'a.png'. Then AppImage uses ImageStore.abs (needs root) and Image.file → errorBuilder in test (file missing) fine, but ImageStore.abs throws if root unset. So set ImageStore.root = temp dir in setUpAll. Then create the file so image decodes maybe. Image.file with invalid bytes → errorBuilder path, prints exception? Flutter test may complain about unhandled image errors ("A test failed with exception: ... invalid image data"). Actually errorBuilder catches it; Image.file's ImageStream errors get reported to FlutterError? With errorBuilder, errors are handled by the widget; however the ImageStreamCompleter reports error to listeners and if errorBuilder is set, it's handled. Usually safe. Safer to write a real PNG bytes so decode succeeds.
+
+We'll create a real 200x200 png via image package and write as 'p1.png' in temp ImageStore root.
+
+For the push test, tapping 裁剪 triggers ImageEditPage initState _load reading file via compute (isolate). In widget tests compute runs on same isolate? flutter_test's compute works. Avoid waiting: after tap, just pump once and check find.byType(ImageEditPage). The async load may complete later, but test ends — pending timers? compute in test may leave pending futures; but the test framework might complain about pending timers only. Should be OK, but to be safe use tester.runAsync for waits? Simpler: test that ImageEditPage widget got pushed with cropOnly true:
+
+await tester.tap(find.text('裁剪'));
+await tester.pump(); // route push
+await tester.pump(const Duration(milliseconds: 300)); // transition
+final page = tester.widget<ImageEditPage>(find.byType(ImageEditPage));
+expect(page.cropOnly, isTrue);
+
+Then to avoid dangling async errors, wait for load via runAsync loop like t215. That may print errors. Alternatively don't do the push test at all — task doesn't require it. But it's valuable to verify. I'll include it with runAsync settle loop, mirroring t215 style.
+
+Hmm, risk of flakiness. Keep it but wrap.
+
+Also test that ImageEditPage cropOnly defaults false: `const ImageEditPage(path: 'x').cropOnly == false` — plain unit test, no widget.
+
+Now also we should verify that after cropping, image replaced with original retained — hard to test without heavy image pipeline. Could test logic via a small pure function? Maybe expose a testable helper? Not necessary; the task's test spec only lists JSON round trip + toolbar. I can add a pure-function-level test if easy. Avoid more public API. Actually the _El.original fallback logic is inside _cropPhoto. Could refactor into a pure top-level function `applyPhotoCrop(_El...)` but _El is private. Hmm.
+
+Alternative: make the crop-open source selectable by a small public helper: `String? collageCropSource(String? image, String? original)`. But that's artificial. I'll consider adding a @visibleForTesting function that runs the whole mutate:
+
+@visibleForTesting
+String collageApplyPhotoCrop(String canvasJson, int index, String newImage) -> returns new json, and asserts original preserved.
+
+That's a reasonable testable seam and mirrors real code. But better: implement _cropPhoto to use a shared helper operating on _El:
+
+void _applyCropResult(_El e, String newImage) { e.original ??= e.image; e.image = newImage; }
+
+and test via collageApplyPhotoCrop(json, index, image) that wraps parse + _applyCropResult + encode. That does test semantics (original recorded once, second crop keeps first original). I'll add that.
+
+Let me write it.
+
+Then widget toolbar test. Let me now write the test file.
+
+Also need import of `@visibleForTesting` → foundation. And test uses Offset etc.
+
+Let me now write the helpers in collage_page.dart.
+
+dsh: reasoning:
+Now let's write the test file.
+
+dsh: reasoning:
+The tap at (30,60) probably hit the element or somewhere not the canvas outer GestureDetector. Let's instead tap a point inside canvas but away from element. Element at x=0.4,y=0.6 of canvas. Canvas centered. Better: use tester.tapAt on a far corner of canvas. Let me compute canvas rect: use find.byKey? canvasKey is private. Alternative: tap within the RepaintBoundary area top-left. Simpler: tap at top-left of the outer canvas container. We can find the container with size? Let's just tap near the top-left corner inside canvas: find the widget by type RepaintBoundary... Many exist. Instead compute canvas rect from the element? Use `tester.getRect(find.byType(Stack).first)`.
+
+Maybe simpler: after selecting, tap on the same Image again? No, that keeps selection.
+
+Approach: find the canvas Container by key using `find.byWidgetPredicate((w) => w is Container && w.key is GlobalKey...)` hmm.
+
+Use tester.getTopLeft(find.byType(RepaintBoundary).first) ... The RepaintBoundary with boundary key is inside the canvas GestureDetector. Actually structure: Center > GestureDetector(onTap) > RepaintBoundary(key: boundary) > Container(canvas). The finder for RepaintBoundary first may be the one in app bar? Order by depth. Let's instead tap at Rect of the image element offset by -100 in y, which is likely still inside canvas since element at 0.6 height. Element size base*scale = w*0.42*1.5.
+
+Actually the tap at (30,60) is in appbar region (AppBar height 56, plus status?). It hit... it did nothing? Selection remained. Let's tap at a point inside the canvas but away from the element: element center is at (canvas center x + (0.4-0.5)*w, canvas top + 0.6*h). Canvas is centered in body. We can get element rect and tap 80 px above element center if within canvas.
+
+Simplest robust: get the rect of the outermost GestureDetector that has onTap and child RepaintBoundary... Let me use find.byWidgetPredicate((w) => w is GestureDetector && w.onTap != null && w.child is RepaintBoundary). Then tester.getRect of it, tap at topLeft + (20,20).
+
+Wait, elements also have onTap GestureDetector. Predicate on child is RepaintBoundary distinguishes.
+
+Let me update test.
+
+dsh: reasoning:
+All 8 pass. Now add tests for cropOnly behavior? Task requires only those two things in the test file. But maybe add a widget test verifying cropOnly opens directly into crop mode (good extra, mirrors t215). That would validate requirement #4 and #2. Let's add a test: pump ImageEditPage(path, cropOnly: true) and check that crop border appears without tapping crop icon, and that tapping check pops with EditedImage. Let's try.
+
+Need to be careful with compute in tests — t215 does it via runAsync waits. Let's write a test in the same file: load image, verify border exists (crop overlay), verify "下一步" not present. Then tap check icon → wait → expect Navigator popped and result EditedImage. Popping requires a Navigator with a route result... We can push the page from a host widget and capture the result.
+
+Let's implement helper similar to t215.
+
+Also, does tap on Icons.check ambiguous? In cropOnly mode, appbar has no undo (mode != ''), so only bottom check. OK.
+
+Let's add.
+
+dsh: reasoning:
+All 9 pass. Now also test that cropOnly page enters crop mode directly? Could add a widget test using ImageEditPage(cropOnly:true) with a real temp image and check border appears immediately. That mirrors t215's helper. Let's add it to t216 test — good value.
+
+Also test "取消则什么都不变" and "确认后替换 image 并 _snap"? Full flow needs saving PNG; heavier but doable: use ImageEditPage cropOnly with real image, tap 全图 then check — it will run compute in isolate; tester.runAsync may be needed. Risky/slow. I'll try adding a cropOnly direct-mode test (similar to t215's _openCrop but without tapping crop icon).
+
+dsh: reasoning:
+Now i hit a problem: there are two separate `open` helper functions now? I replaced the closing of first group adding new group with its own setUp/open. And there may be duplicate `late Directory root;` — no, separate groups. Fine.
+
+Now run full analyze & full test.
+
+Also: should the crop replacement preserve the *aspect*? Not required.
+
+One more consideration from task item 3: "复制元素时一并复制" — copy uses toJson/fromJson round trip which now includes 'o'. Good, covered.
+
+Let me also double check _selectedPhoto is used in build; when sel changes we setState so rebuild happens.
+
+Potential issue: tapping 裁剪 button in toolbar when element selected—the InkWell onTap triggers _cropPhoto which pushes route. Fine.
+
+Another issue: _tool uses Expanded inside Row; adding a 6th item is fine.
+
+Also important: after crop returns and `e.image = r.image`, does the collage snapshot/undo work? Yes _snap.
+
+Edge: When cropOnly page is popped by system back without result, r==null → nothing changes. Good.
+
+Now: the `_applyCrop` in cropOnly mode never resets `busy` but we pop immediately so fine. However if _popCropped fails (cur null) we return leaving busy true. Minor.
+
+Also consider: in cropOnly mode, if the image is a small crop... fine.
+
+Let's run full analyze and full test.
+
+dsh: reasoning:
+Same 27 issues; only line number shift of a pre-existing info (image_edit_page.dart:90 → 96, the `_cutout` toast? Actually line 90 was in _cutout). The task says new code must not add info. The existing info just moved lines due to added lines above. Hmm, is that "新增 info"? It's the same lint occurrence, just relocated. However, ideally avoid the appearance of a new info. Let me check what's at line 96 now — it's `toast(...)` in `_load` or `_cutout`? Let me check.
+
+Actually before: image_edit_page.dart:90:11 use_build_context_synchronously (in _cutout: `toast(context, ...)` after await). Now line 96 because we added comments/lines... wait we added cropOnly in constructor (+4 lines) and initState comment (+1) → +5/-0, so 90 → 95/96. Right.
+
+Could be cleaner: keep the same total? Not necessary; the diff comparison of issue count is same. But a strict reviewer may diff text and see a "new" line. I could avoid by noting in report. It's the same lint at the same code (toast in _cutout). Fine — I'll mention it.
+
+Alternatively I can reduce added lines above by not adding comment lines. Meh. Better: I could reorder so no shift? Not worth. Report will explain.
+
+Actually I could silence nothing. Fine.
+
+Now full test run. Then reports.
+
+dsh: reasoning:
+38 passed, 1 failed (screens_test font, pre-existing). Baseline was 28 passed; we added 10 tests → 38. Good.
+
+Now write reports: T216-analyze-after.txt, T216-test.txt, T216-diff.patch, T216-summary.md. Also check pubspec.lock not modified in diff (git status). And verify T214/T215 changes retained.
+
+Let me also think about correctness details:
+- Position of crop button: inserted before 更多. Fine.
+- `_cropPhoto` uses `e.original ??= e.image` before replacing image — but the original might be a relative path used by ImageStore.abs. Yes.
+- One issue: when the original is cropped and re-cropped, `e.original` stays as the original. Good.
+- `_popCropped` uses `widget.path` as original in EditedImage — the collage page doesn't use r.original though; it keeps e.original. Fine.
+- `_setImage` after crop pushes previous cur onto undoStack; in cropOnly mode, undoStack will have the original image. If user taps undo? In crop mode the undo button only shows when mode==''. Since cropOnly stays in crop mode until pop, no issue.
+
+Wait: in cropOnly mode after `_applyCrop`, we pop. Fine.
+
+Also potential issue: `busy` stays true while popping — fine.
+
+Another consideration: cancel in crop mode (`cropOnly`) pops without result → `_cropPhoto` r==null → no changes. Good.
+
+Also the appbar title shows '裁剪' in crop mode. Good.
+
+One more: the task said "裁剪页沿用 T215 的方案". Unchanged.
+
+Potential issue: does the crop overlay rely on `Image` widget being present? Not affected.
+
+Also `_load` sets mode = 'crop' before loading; the body shows CircularProgressIndicator until cur != null. Fine.
+
+Edge: file path for original — ImageEditPage(path: ImageStore.abs(src)).
+
+Now check whether `push<EditedImage>` works with ImageEditPage returning EditedImage; yes.
+
+Now let me check git diff for collage page to ensure no remnants, and produce patch. Also confirm T214/T215 files unchanged (git diff of those still there).
+
+Let me generate the patch: for changed files collage_page.dart and image_edit_page.dart, the diff will include T215's changes too since uncommitted. That's a problem! The task says T216-diff.patch 只含本次改动的文件 — but those files already contained T215 changes uncommitted, so git diff includes both. T215-diff.patch already contains T215 changes for image_edit_page. For T216-diff.patch, ideally only T216's additions. Hmm. The instruction: "只含本次改动的文件的 diff 加新文件" — includes the files changed this time. Since T215 changes are in the same files and uncommitted, a full git diff includes them. Better: baseline snapshot approach — I can reconstruct T216-only diff by diffing against a pre-edit copy. Do I have pre-edit content? I modified in place without backup. I can reconstruct from T215-diff.patch (reverse) — or use `git diff` plus check other files. Actually simpler: use git stash? No, forbidden.
+
+Alternative: I can generate a T216-only patch with `git diff` restricted to the two files, then note that it also contains preceding T215 edits for context. But T215-diff.patch includes image_edit_page plus new utils/test files. The image_edit_page portion of T216-diff would overlap.
+
+Better approach: create a baseline copy of the two files by reverting T216 changes mentally? Risky. But I can reconstruct the pre-T216 versions: for image_edit_page.dart, apply reverse of T215-diff.patch to current file to get... no, that gives the original (pre-T215) file, not pre-T216.
+
+Hmm, but wait: I can reconstruct pre-T216 image_edit_page = current file minus my 2 edits (cropOnly param, initState, _applyCrop/_popCropped, crop bottom bar). I know exactly what I changed. Similarly for collage_page. Could construct via a script with the exact removed text, but diff would then only be approximate.
+
+Alternate practical approach: Since T215-diff.patch exists and contains the pre-T216 diff of image_edit_page, I can compute: pre-T216 file = current file with my edits reversed. I can do this by writing the reverse edits with python string replacement, saving to /tmp/baseline/, then `diff -u` to produce T216-only patch with paths prefixed a/source/... Good, that's accurate as long as I reverse exactly what I changed.
+
+Let me do that carefully. Changes to image_edit_page.dart:
+1. Constructor block (doc + cropOnly field + const ctor).
+2. initState mode line.
+3. _applyCrop replacement (+_popCropped).
+4. crop bottom bar close button + tooltips.
+
+Changes to collage_page.dart:
+1. import image_edit_page.
+2. _El original field + toJson/fromJson + import 'package:flutter/material.dart' already has visibleForTesting? `@visibleForTesting` comes from package:flutter/foundation.dart or meta. Is it exported by material.dart? material exports foundation, yes — analyzer passed with no new info, so fine.
+3. collageJsonRoundTrip helper.
+4. _selectedPhoto getter.
+5. _cropPhoto method.
+6. toolbar button.
+
+I'll produce baseline by scripted reverse replacements and diff. Let me first save current copies.
+
+Actually simpler and cleaner: report the T216-only patch generated this way, and also mention in summary that full working-tree diff also includes T215/T214 (uncommitted) and give command. Good.
+
+Let me do it.
+
+dsh: reasoning:
+To produce a T216-only diff (not including T214/T215 uncommitted changes), I need to diff against the state before my edits. I didn't snapshot the original versions before editing. But I can reconstruct: T215's diff patch has the version before? Actually the working tree contains T214/T215 changes uncommitted, and HEAD version is older. I need the "before T216" version = HEAD + T214/T215 changes. T215-diff.patch contains the diff of image_edit_page/collage_page? T215 patch touched image_edit_page, crop_math, crop_math_test. T214 patch touched collage_page (rotateDelta) etc.
+
+Best approach: reconstruct pre-T216 files by reverse-applying my changes. Alternative: derive from HEAD by applying T214+T215 patches. Let's check T214-diff.patch includes collage_page.
+
+Plan: create a temp copy of HEAD versions, apply T214 patch and T215 patch (they cover all prior uncommitted changes), then diff against current — that yields T216-only diff. Let's verify T214/T215 patches together cover all files currently modified.
+
+But careful: T214/T215 patches were generated against HEAD at their time; both include collage_page.dart? Check.
+
+dsh: reasoning:
+I need a diff of only my changes: collage_page.dart (includes T214 changes too — unavoidable since it's the same file; I'll base on HEAD and note that T214's changes are included since it's the same uncommitted file). Hmm. Better: generate diff against the state before my edits. I don't have that state... but I could reconstruct: git stash not allowed. Alternative: I can produce diff of collage_page.dart against HEAD (which includes T214's small collage change) — but task says "只含本次改动的文件的 diff". The prior T214 patch includes collage_page.dart changes already. To make T216 patch only my changes, I can reconstruct the pre-T216 state from git HEAD + T214 patch? Actually T214's collage diff is small (17 lines). I could apply reverse of my edits... Simpler approach: build a "before" version of the two files by taking current and undoing my edits manually? That's error-prone.
+
+Better: T215 patch contains image_edit_page.dart diff against HEAD, and current file before my change = HEAD + T215 patch. So I can reconstruct: git show HEAD:file > tmp, apply T215 patch portion → gives pre-T216 state. For collage_page: HEAD + T214 patch portion → pre-T216 state. Then diff pre-T216 vs current. Let me do that carefully.
+
+Actually simpler: I know exactly what I changed. Since each edit was surgical, I could reconstruct via applying reverse patches, but let's do the reconstruct approach.
+
+Steps:
+1. mkdir /tmp/t216/base/{lib/pages}, and copy HEAD versions: `git show HEAD:source/.../collage_page.dart`.
+2. Apply T214 patch filtered for collage_page.dart, T215 patch filtered for image_edit_page.dart. Use `git apply --directory`? We need paths adjusted. Use filterdiff-like python to extract the per-file hunks and apply with `patch -p1` from repo root after staging an isolated tree.
+
+Set up /tmp/t216/base as a copy of repo root structure? Easier: create /tmp/t216/base/source/wardrobe-android/lib/pages/*.dart from HEAD, then `patch -p1 -d /tmp/t216/base < filtered.patch` where filtered patch paths are a/source/wardrobe-android/lib/pages/... Good.
+
+Then diff -u with labels a/... b/... to produce a git-style patch. Use `git diff --no-index` for nice headers, then sed paths.
+
+Let me do it.
+
+dsh: reasoning:
+ 
+
+dsh: reasoning:
+The reconstructed base equals HEAD + T214/T215 patches and my changes are the only differences. Let me generate the T216 diff from /tmp/t216/base to current, plus the new test file, in git format with a/ b/ source/wardrobe-android prefixes.
+
+I'll use `git diff --no-index` style but need paths. Simpler: create a directory structure /tmp/t216/base and /tmp/t216/cur (current files) and run `diff -u` with proper labels. Use `git diff --no-index --src-prefix=a/ --dst-prefix=b/` on files with relative paths.
+
+Let me set up: /tmp/t216/a/source/... (base), /tmp/t216/b/source/... (current + new test). Then `git diff --no-index a b` produces paths a/source/... which is what we want.
+
+dsh: reasoning:
+The paths have an extra "a/". Fix by generating with prefixes empty then adding. Let me use `--src-prefix=` tricks: run git diff from within /tmp/t216 with paths `a/...` `b/...`. Better: use `git diff --no-index /dev/null` no.
+
+Simplest: generate then sed the header paths: replace `a/a/` -> `a/`, `b/b/` -> `b/`, and for new file `--- /dev/null` fine. Let's do sed.
+
+dsh: reasoning:
+Verify the patch applies cleanly by reconstructing current files from base + patch using a python applier (no `patch` binary). Let me reuse the applier on the verify tree.
+
+dsh: reasoning:
+Only extra files; the two changed files match (no diff lines for them). But it aborted before checking the test file. Let me run the two specific file comparisons.
+
+dsh: reasoning:
+The new-file hunk header count may be off, or the `\ No newline` issue. Actual file 8575 bytes vs mine. Let's check the tail difference.
+
+Likely the diff has "\\ No newline at end of file"? No. Probably the patch has proper content but my applier lost the last line? Let me diff.
+
+dsh: reasoning:
+Only trailing newline difference from my applier. Fine — patch content is right (the applied file lacks final newline because applier joined lines). Accept.
+
+Now write report files: T216-analyze-before/after, T216-test.txt, T216-summary.md, T216-diff.patch, T216-progress.md maybe.
+
+Also check pubspec.lock unchanged (git status).
+
+dsh: reasoning:
+ 
+
+dsh: reasoning:
+ 
+
+dsh: reasoning:
+ 
+
+dsh: reasoning:
+ 
+
+测试通过：38 通过、1 失败（screens_test 缺字体，原有问题）。现在生成 T216 专属 diff 并写报告。
+exit=124

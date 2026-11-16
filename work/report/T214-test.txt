@@ -1,0 +1,40 @@
+00:00 +0: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart
+00:00 +0: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = 0：方向不变
+00:00 +1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = π/2：局部向右 = 屏幕向下
+00:00 +2: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = π：左右上下全反
+00:00 +3: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = 2π 等价于 0
+00:00 +4: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = -π/2：局部向右 = 屏幕向上
+00:00 +5: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: 任意角度长度不变
+00:00 +6: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart
+00:00 +6: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: (setUpAll)
+00:00 +6: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: ImagePreviewPage 显示 2/3，滑动后显示 3/3
+00:01 +7: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: 初始为第 1 张显示 1/3，关闭按钮存在
+00:01 +8: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: (tearDownAll)
+00:01 +8: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/migrate_test.dart
+00:02 +8: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/migrate_test.dart: v1 -> v2 migration keeps data
+00:02 +9: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/migrate_test.dart: recommender builds outfits and respects filters
+00:02 +10: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart
+00:03 +10: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (setUpAll)
+00:03 +10 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (setUpAll) [E]
+  PathNotFoundException: Cannot open file, path = '/tmp/shot_fonts/NotoSansSC-Regular.otf' (OS Error: No such file or directory, errno = 2)
+  dart:io                       _File.readAsBytesSync
+  test/screens_test.dart 30:69  _loadFont
+  test/screens_test.dart 48:13  main.<fn>
+  
+00:03 +10 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (tearDownAll)
+00:03 +10 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart
+00:04 +10 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 只有上衣：图2 是上衣
+00:04 +11 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 只有下装：图2 是下装
+00:04 +12 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 上下都有：图2 上衣、图3 下装
+00:04 +13 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 连衣裙提示与固定尾巴都在
+00:04 +14 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: 模型列表只有千问图像编辑两档
+00:04 +15 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart
+00:04 +15 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 旧值 aitryon → qwen-image-3.0
+00:05 +16 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 旧值 aitryon-plus → qwen-image-3.0-pro
+00:05 +17 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 空值（首次启动）→ qwen-image-3.0
+00:05 +18 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 未知值 → qwen-image-3.0
+00:05 +19 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 已经是新值则原样返回
+00:05 +20 -1: Some tests failed.
+
+Failing tests:
+  /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (setUpAll)

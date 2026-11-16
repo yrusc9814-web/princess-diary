@@ -1,0 +1,86 @@
+Flutter assets will be downloaded from https://storage.flutter-io.cn. Make sure you trust this source!
+00:00 +0: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart
+00:00 +0: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = 0：方向不变
+00:00 +1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = π/2：局部向右 = 屏幕向下
+00:00 +2: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = π：左右上下全反
+00:00 +3: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = 2π 等价于 0
+00:00 +4: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: rot = -π/2：局部向右 = 屏幕向上
+00:00 +5: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/collage_rotate_test.dart: 任意角度长度不变
+00:00 +6: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart
+00:00 +6: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart: scale=1 且无平移时裁剪框不变
+00:00 +7: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart: scale=2 以中心放大，并夹在 [0,1]
+00:00 +8: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart: scale=0.1 时宽高都不小于 0.08
+00:00 +9: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart: 焦点在左上角时缩小，左上角不动
+00:00 +10: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart: 平移越界被夹回且尺寸不变
+00:00 +11: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/crop_math_test.dart: 缩放同时跟随焦点平移
+00:00 +12: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart
+00:01 +12: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: (setUpAll)
+00:01 +12: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: ImagePreviewPage 显示 2/3，滑动后显示 3/3
+00:02 +13: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: 初始为第 1 张显示 1/3，关闭按钮存在
+00:02 +14: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/image_preview_page_test.dart: (tearDownAll)
+00:02 +14: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/migrate_test.dart
+00:03 +14: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/migrate_test.dart: v1 -> v2 migration keeps data
+00:03 +15: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/migrate_test.dart: recommender builds outfits and respects filters
+00:03 +16: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart
+00:04 +16: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (setUpAll)
+00:04 +16 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (setUpAll) [E]
+  PathNotFoundException: Cannot open file, path = '/tmp/shot_fonts/NotoSansSC-Regular.otf' (OS Error: No such file or directory, errno = 2)
+  dart:io                       _File.readAsBytesSync
+  test/screens_test.dart 30:69  _loadFont
+  test/screens_test.dart 48:13  main.<fn>
+  
+00:04 +16 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (tearDownAll)
+00:04 +16 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t215_crop_gesture_test.dart
+00:05 +16 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t215_crop_gesture_test.dart: 裁剪模式双指捏合让框变小
+00:06 +17 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t215_crop_gesture_test.dart: 角把手仍能单独拖动（不被缩放手势层抢走）
+00:07 +18 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart
+00:07 +18 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: _El 的 original 字段 JSON 往返 带 'o'：裁剪后的照片能记住原图
+00:07 +19 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: _El 的 original 字段 JSON 往返 不带 'o' 的旧数据：解析不报错，original 为空
+00:07 +20 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: _El 的 original 字段 JSON 往返 旧数据里 'o' 显式为 null 也能读
+00:07 +21 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 工具栏「裁剪」按钮的出现条件 未选中任何元素：5 个工具，没有「裁剪」
+00:08 +22 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 工具栏「裁剪」按钮的出现条件 选中照片：多出「裁剪」
+00:09 +23 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 工具栏「裁剪」按钮的出现条件 选中单品：没有「裁剪」
+00:09 +24 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 工具栏「裁剪」按钮的出现条件 选中文字：没有「裁剪」
+00:09 +25 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 工具栏「裁剪」按钮的出现条件 选中照片→再点空白取消选中：「裁剪」消失
+00:09 +26 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 裁剪入口 cropOnly 的编辑页一进来就是裁剪模式（不用再点一次裁剪）
+00:09 +27 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t216_collage_crop_test.dart: 裁剪入口 点「裁剪」进裁剪页，原图传的是 original 而不是裁过的图
+00:10 +28 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart
+00:11 +28 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 文件名格式 gongzhuriji_yyyy-MM-dd_HHmm.wrdx
+00:11 +29 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 文件名格式 前缀/后缀与自动清理用的常量一致
+00:11 +30 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 数据指纹 数据不变，两次指纹相同（exportedAt 变化不影响）
+00:11 +31 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 数据指纹 图片顺序不影响指纹
+00:11 +32 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 数据指纹 改一条数据后指纹不同
+00:11 +33 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 数据指纹 增删一张图后指纹不同
+00:11 +34 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 数据指纹 图片大小或修改时间变化后指纹不同
+00:11 +35 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 首次备份：写一个新文件并记下指纹
+00:11 +36 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 数据不变：跳过不写文件，只更新检查时间
+00:11 +37 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 数据有变化：写新文件、删旧文件、更新指纹
+00:11 +38 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 加一张图片算数据有变化
+00:11 +39 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 写文件失败：旧文件保留、指纹不变、报错
+00:11 +40 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 拷贝进公共目录失败：同样保留旧文件、不更新指纹
+00:11 +41 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 备份流程 只保留最新一份：目录里其它前缀的文件不动
+00:11 +42 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 打包格式 writeArchive 产出 data.json + images/，文件名用新命名
+00:11 +43 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 下一个 03:00 的延迟 00:12 → 2h48m
+00:11 +44 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 下一个 03:00 的延迟 03:00 整 → 24h
+00:11 +45 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 下一个 03:00 的延迟 23:59 → 3h01m
+00:11 +46 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 下一个 03:00 的延迟 跨月/跨年也对
+00:11 +47 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 启动兜底 从未检查过 → 要跑
+00:11 +48 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 启动兜底 23 小时前 → 不跑
+00:11 +49 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 启动兜底 25 小时前 → 跑
+00:11 +50 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/t217_auto_backup_test.dart: 启动兜底 正好 24 小时 → 跑
+00:11 +51 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart
+00:12 +51 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 只有上衣：图2 是上衣
+00:12 +52 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 只有下装：图2 是下装
+00:12 +53 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 上下都有：图2 上衣、图3 下装
+00:12 +54 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: TryOn.prompt 指令里图号 连衣裙提示与固定尾巴都在
+00:12 +55 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_prompt_test.dart: 模型列表只有千问图像编辑两档
+00:12 +56 -1: loading /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart
+00:12 +56 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 旧值 aitryon → qwen-image-3.0
+00:12 +57 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 旧值 aitryon-plus → qwen-image-3.0-pro
+00:12 +58 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 空值（首次启动）→ qwen-image-3.0
+00:12 +59 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 未知值 → qwen-image-3.0
+00:12 +60 -1: /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/tryon_settings_test.dart: 已经是新值则原样返回
+00:12 +61 -1: Some tests failed.
+
+Failing tests:
+  /workspace/projects/01d8ae01-28ae-436c-a7dc-999efa476bf4/princess-diary/source/wardrobe-android/test/screens_test.dart: (setUpAll)

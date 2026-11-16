@@ -11,6 +11,7 @@ import '../widgets/common.dart';
 import '../widgets/pickers.dart';
 import 'clothes_detail_page.dart';
 import 'collage_page.dart';
+import 'image_preview_page.dart';
 import 'select_pages.dart';
 import 'tryon_page.dart';
 
@@ -317,14 +318,19 @@ class _OutfitFormPageState extends State<OutfitFormPage> {
           crossAxisSpacing: 10,
           childAspectRatio: 0.75,
           children: [
-            for (final p in o.photos)
+            for (var i = 0; i < o.photos.length; i++)
               Stack(children: [
-                Positioned.fill(child: ClipRRect(borderRadius: BorderRadius.circular(12), child: AppImage(p, fit: BoxFit.cover))),
+                Positioned.fill(
+                  child: GestureDetector(
+                    onTap: () => push(context, ImagePreviewPage(images: List<String>.from(o.photos), initial: i)),
+                    child: ClipRRect(borderRadius: BorderRadius.circular(12), child: AppImage(o.photos[i], fit: BoxFit.cover)),
+                  ),
+                ),
                 Positioned(
                   right: 2,
                   top: 2,
                   child: GestureDetector(
-                    onTap: () => setState(() => o.photos.remove(p)),
+                    onTap: () => setState(() => o.photos.removeAt(i)),
                     child: const CircleAvatar(radius: 11, backgroundColor: Color(0x66000000), child: Icon(Icons.close, size: 14, color: Colors.white)),
                   ),
                 ),

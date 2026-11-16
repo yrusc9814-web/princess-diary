@@ -1,0 +1,6 @@
+- [15:22] 第1项完成：tryon.dart(重写为千问图像编辑同步接口+prompt+models+friendlyError)、settings.dart(tryOnModel 旧值迁移)、settings_page.dart(遍历 TryOn.models，说明文字更新)
+- [15:24] 第2项完成：新建 lib/pages/image_preview_page.dart（PageView+InteractiveViewer+双击1x/2.5x+顶部 n/N 与关闭）；outfit_form_page._photos() 格子加 onTap push 预览、改用索引删除
+- [15:24] 第3项完成：collage_page.dart 顶层新增 rotateDelta() 纯函数，onScaleUpdate 先用更新前 e.rot 把 focalPointDelta 转回屏幕坐标再加到 e.x/e.y
+- [Hark 验收 15:40] analyze：新增 2 条 info（image_preview_page.dart 用了已弃用的 Matrix4.scale；test/collage_rotate_test.dart 多余 import material）→ 必须清掉。
+- [Hark 验收] flutter test 需先 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost。结果 18 过 3 败：image_preview_page_test 两条失败（AppImage 里 LateInitializationError: Field 'root' has not been initialized —— 测试没初始化 root，测试里要先初始化或给 ImagePreviewPage 能注入图片构建方式，别改 AppImage 业务逻辑）；screens_test 缺 /tmp/shot_fonts 字体是原有环境问题，不用管。
+- [16:12] 收尾完成：清掉 2 条新增 info（image_preview_page 用 scaleByDouble、collage_rotate_test 删多余 material import）；image_preview_page_test 在 setUpAll 里给 ImageStore.root 建临时目录，2 条失败转绿；analyze 27 条与基线一致、新增 0；test 20 过 1 败（仅 screens_test 缺字体）。已写 T214-summary.md 与 T214-diff.patch（638 行/10 文件，含 5 个新文件）。

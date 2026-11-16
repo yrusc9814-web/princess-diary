@@ -1,0 +1,377 @@
+diff --git a/source/wardrobe-android/lib/pages/collage_page.dart b/source/wardrobe-android/lib/pages/collage_page.dart
+index f635e38..3abe73d 100644
+--- a/source/wardrobe-android/lib/pages/collage_page.dart
++++ b/source/wardrobe-android/lib/pages/collage_page.dart
+@@ -10,6 +10,7 @@ import '../data/db.dart';
+ import '../data/models.dart';
+ import '../services/images.dart';
+ import '../widgets/common.dart';
++import 'image_edit_page.dart';
+ import 'outfit_form_page.dart';
+ import 'select_pages.dart';
+ 
+@@ -37,11 +38,24 @@ class _El {
+   String text;
+   int color;
+   double x, y, scale, rot;
+-  _El({required this.kind, this.image, this.clothesId, this.text = '', this.color = 0xFF000000, this.x = 0.5, this.y = 0.5, this.scale = 1, this.rot = 0});
+-  Map<String, dynamic> toJson() => {'k': kind, 'i': image, 'c': clothesId, 't': text, 'col': color, 'x': x, 'y': y, 's': scale, 'r': rot};
++
++  /// 照片被裁剪前的完整原图（相对路径）。第一次裁剪时记下，之后每次裁剪都从它重新开始，
++  /// 这样反复裁剪不会越裁越小。旧数据没有这个字段时为 null，表示 image 就是原图。
++  String? original;
++  _El({required this.kind, this.image, this.clothesId, this.text = '', this.color = 0xFF000000, this.x = 0.5, this.y = 0.5, this.scale = 1, this.rot = 0, this.original});
++  Map<String, dynamic> toJson() => {'k': kind, 'i': image, 'c': clothesId, 't': text, 'col': color, 'x': x, 'y': y, 's': scale, 'r': rot, 'o': original};
+   factory _El.fromJson(Map<String, dynamic> j) => _El(
+       kind: j['k'], image: j['i'], clothesId: j['c'], text: j['t'] ?? '', color: j['col'] ?? 0xFF000000,
+-      x: (j['x'] as num).toDouble(), y: (j['y'] as num).toDouble(), scale: (j['s'] as num).toDouble(), rot: (j['r'] as num).toDouble());
++      x: (j['x'] as num).toDouble(), y: (j['y'] as num).toDouble(), scale: (j['s'] as num).toDouble(), rot: (j['r'] as num).toDouble(),
++      original: j['o'] as String?);
++}
++
++/// 仅供测试：把画布 JSON 解析后再序列化，用来验证 _El 的字段（包括 'o'）往返不丢。
++@visibleForTesting
++String collageJsonRoundTrip(String canvasJson) {
++  final m = jsonDecode(canvasJson) as Map<String, dynamic>;
++  final list = (m['els'] as List).map((e) => _El.fromJson(Map<String, dynamic>.from(e as Map)));
++  return jsonEncode({'els': list.map((e) => e.toJson()).toList(), 'bg': m['bg'], 'bgImage': m['bgImage']});
+ }
+ 
+ /// 内置背景：纯色与渐变
+@@ -74,6 +88,14 @@ class _CollagePageState extends State<CollagePage> {
+   // 手势
+   double _startScale = 1, _startRot = 0;
+ 
++  /// 当前选中的照片元素（没选中或选中的是单品/文字时为 null）。
++  _El? get _selectedPhoto {
++    final i = sel;
++    if (i == null || i < 0 || i >= els.length) return null;
++    final e = els[i];
++    return e.kind == 'photo' ? e : null;
++  }
++
+   @override
+   void initState() {
+     super.initState();
+@@ -136,6 +158,24 @@ class _CollagePageState extends State<CollagePage> {
+     });
+   }
+ 
++  /// 只给照片元素用：点「裁剪」才进裁剪页，选完照片不会自动进来。
++  ///
++  /// 每次都从 original（第一次裁剪前记下的完整原图）打开，所以反复裁剪不会越裁越小。
++  /// 确认后只替换 image，位置/缩放/旋转保持不变，再压入撤销栈；取消则什么都不改。
++  Future<void> _cropPhoto() async {
++    final e = _selectedPhoto;
++    if (e == null) return;
++    final src = e.original ?? e.image;
++    if (src == null || src.isEmpty) return;
++    final r = await push<EditedImage>(context, ImageEditPage(path: ImageStore.abs(src), cropOnly: true));
++    if (!mounted || r == null) return;
++    setState(() {
++      e.original ??= e.image;
++      e.image = r.image;
++      _snap();
++    });
++  }
++
+   Future<void> _editText([_El? e]) async {
+     final r = await Navigator.of(context).push<(String, int)>(PageRouteBuilder(
+       opaque: false,
+@@ -393,6 +433,8 @@ class _CollagePageState extends State<CollagePage> {
+               _tool(Icons.photo_outlined, '照片', _addPhoto),
+               _tool(Icons.text_fields, '文字', () => _editText()),
+               _tool(Icons.wallpaper, '背景', _background),
++              // 只有选中照片时才出现「裁剪」，单品/文字/未选中都没有。
++              if (_selectedPhoto != null) _tool(Icons.crop, '裁剪', _cropPhoto),
+               _tool(Icons.more_horiz, '更多', _more),
+             ]),
+           ),
+diff --git a/source/wardrobe-android/lib/pages/image_edit_page.dart b/source/wardrobe-android/lib/pages/image_edit_page.dart
+index 0468a49..7df7fd4 100644
+--- a/source/wardrobe-android/lib/pages/image_edit_page.dart
++++ b/source/wardrobe-android/lib/pages/image_edit_page.dart
+@@ -21,8 +21,12 @@ class EditedImage {
+ class ImageEditPage extends StatefulWidget {
+   final String path; // 源图（绝对路径）
+   final bool newClothes; // true: 下一步进入添加单品；false: 返回 EditedImage
++
++  /// true: 只做裁剪（拼图里的照片重新裁剪用）。进来直接是裁剪模式，
++  /// 确认裁剪后不留下编辑页，直接 pop 返回 [EditedImage]。
++  final bool cropOnly;
+   final bool autoCutout;
+-  const ImageEditPage({super.key, required this.path, this.newClothes = false, this.autoCutout = false});
++  const ImageEditPage({super.key, required this.path, this.newClothes = false, this.cropOnly = false, this.autoCutout = false});
+   @override
+   State<ImageEditPage> createState() => _ImageEditPageState();
+ }
+@@ -48,6 +52,8 @@ class _ImageEditPageState extends State<ImageEditPage> {
+   @override
+   void initState() {
+     super.initState();
++    // cropOnly：进来就直接是裁剪模式，不经过「编辑图片」的工具页。
++    mode = widget.cropOnly ? 'crop' : '';
+     _load();
+   }
+ 
+@@ -107,10 +113,17 @@ class _ImageEditPageState extends State<ImageEditPage> {
+   }
+ 
+   Future<void> _applyCrop() async {
++    final only = widget.cropOnly;
+     setState(() => busy = true);
+     final r = Rect.fromLTRB(crop.left * imgSize.width, crop.top * imgSize.height, crop.right * imgSize.width, crop.bottom * imgSize.height);
+     final out = await compute(_crop, (cur!, [r.left, r.top, r.width, r.height]));
+     await _setImage(out);
++    if (!mounted) return;
++    if (only) {
++      // 拼图里重新裁剪：裁完就返回这张图，不走擦除/抠图/下一步。
++      await _popCropped();
++      return;
++    }
+     setState(() {
+       busy = false;
+       mode = '';
+@@ -118,6 +131,17 @@ class _ImageEditPageState extends State<ImageEditPage> {
+     });
+   }
+ 
++  /// cropOnly 模式：把当前图存成文件，直接 pop 返回 [EditedImage]。
++  /// original 给的是进来时的源图，拼图页据此保留完整原图。
++  Future<void> _popCropped() async {
++    final b = cur;
++    if (b == null) return;
++    final image = await ImageStore.savePng(await compute(_toPng, b), 'img');
++    final thumb = await ImageStore.makeThumb(image);
++    if (!mounted) return;
++    Navigator.pop(context, EditedImage(image, widget.path, thumb));
++  }
++
+   double _scaleToImage = 1;
+ 
+   Future<void> _next() async {
+@@ -228,10 +252,15 @@ class _ImageEditPageState extends State<ImageEditPage> {
+       return Padding(
+         padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+         child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+-          IconButton(icon: const Icon(Icons.close), onPressed: () => setState(() => mode = '')),
++          // cropOnly 时整页就是裁剪，关闭 = 放弃返回上一页。
++          IconButton(
++            icon: const Icon(Icons.close),
++            tooltip: '取消',
++            onPressed: widget.cropOnly ? () => Navigator.pop(context) : () => setState(() => mode = ''),
++          ),
+           TextButton(onPressed: () => setState(() => crop = const Rect.fromLTRB(0, 0, 1, 1)), child: const Text('全图')),
+           const Text('裁剪', style: TextStyle(fontWeight: FontWeight.w600)),
+-          IconButton(icon: const Icon(Icons.check), onPressed: busy ? null : _applyCrop),
++          IconButton(icon: const Icon(Icons.check), tooltip: '完成裁剪', onPressed: busy ? null : _applyCrop),
+         ]),
+       );
+     }
+diff --git a/source/wardrobe-android/test/t216_collage_crop_test.dart b/source/wardrobe-android/test/t216_collage_crop_test.dart
+new file mode 100644
+index 0000000..3b0358a
+--- /dev/null
++++ b/source/wardrobe-android/test/t216_collage_crop_test.dart
+@@ -0,0 +1,201 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:image/image.dart' as img;
++import 'package:my_wardrobe/pages/collage_page.dart';
++import 'package:my_wardrobe/pages/image_edit_page.dart';
++import 'package:my_wardrobe/services/images.dart';
++
++/// T216：拼图里的照片要用户主动点「裁剪」才进裁剪页。
++/// - _El 的 original 字段（JSON 键 'o'）带/不带都要能往返；
++/// - 底部工具栏只在选中照片时出现「裁剪」，单品/文字/未选中都不出现。
++
++String _canvas(List<Map<String, dynamic>> els) => jsonEncode({'els': els, 'bg': [0xFFFFFFFF], 'bgImage': null});
++
++Map<String, dynamic> _photo({String? original}) => {
++      'k': 'photo',
++      'i': 'img_cropped.jpg',
++      'c': null,
++      't': '',
++      'col': 0xFF000000,
++      'x': 0.4,
++      'y': 0.6,
++      's': 1.5,
++      'r': 0.25,
++      if (original != null) 'o': original,
++    };
++
++Map<String, dynamic> _clothes() => {'k': 'clothes', 'i': 'cloth.jpg', 'c': 7, 't': '', 'col': 0xFF000000, 'x': 0.3, 'y': 0.3, 's': 1, 'r': 0};
++
++Map<String, dynamic> _text() => {'k': 'text', 'i': null, 'c': null, 't': '你好', 'col': 0xFF000000, 'x': 0.5, 'y': 0.5, 's': 1, 'r': 0};
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  group('_El 的 original 字段 JSON 往返', () {
++    test('带 \'o\'：裁剪后的照片能记住原图', () {
++      final out = jsonDecode(collageJsonRoundTrip(_canvas([_photo(original: 'orig_a.jpg')]))) as Map<String, dynamic>;
++      final el = (out['els'] as List).first as Map<String, dynamic>;
++      expect(el['o'], 'orig_a.jpg');
++      expect(el['i'], 'img_cropped.jpg');
++      // 其余字段不受影响
++      expect(el['x'], 0.4);
++      expect(el['y'], 0.6);
++      expect(el['s'], 1.5);
++      expect(el['r'], 0.25);
++    });
++
++    test('不带 \'o\' 的旧数据：解析不报错，original 为空', () {
++      final out = jsonDecode(collageJsonRoundTrip(_canvas([_photo()]))) as Map<String, dynamic>;
++      final el = (out['els'] as List).first as Map<String, dynamic>;
++      expect(el.containsKey('o'), isTrue);
++      expect(el['o'], isNull);
++      expect(el['i'], 'img_cropped.jpg');
++    });
++
++    test('旧数据里 \'o\' 显式为 null 也能读', () {
++      final el = _photo()..['o'] = null;
++      final out = jsonDecode(collageJsonRoundTrip(_canvas([el]))) as Map<String, dynamic>;
++      expect(((out['els'] as List).first as Map<String, dynamic>)['o'], isNull);
++    });
++  });
++
++  group('工具栏「裁剪」按钮的出现条件', () {
++    late Directory root;
++
++    setUp(() async {
++      // AppImage 会按相对路径读本地文件，指到临时目录避免读真实相册目录。
++      root = await Directory.systemTemp.createTemp('t216_images');
++      ImageStore.root = root.path;
++      File('${root.path}/img_cropped.jpg').writeAsBytesSync(_onePixelPng);
++      File('${root.path}/cloth.jpg').writeAsBytesSync(_onePixelPng);
++    });
++
++    tearDown(() async {
++      if (await root.exists()) await root.delete(recursive: true);
++    });
++
++    Future<void> open(WidgetTester tester, List<Map<String, dynamic>> els) async {
++      await tester.pumpWidget(MaterialApp(home: CollagePage(canvasJson: _canvas(els))));
++      await tester.pumpAndSettle();
++    }
++
++    Future<void> tapElement(WidgetTester tester, Type widgetType, {int index = 0}) async {
++      final f = find.byType(widgetType);
++      expect(f, findsWidgets);
++      await tester.tap(f.at(index));
++      await tester.pumpAndSettle();
++    }
++
++    testWidgets('未选中任何元素：5 个工具，没有「裁剪」', (tester) async {
++      await open(tester, [_photo()]);
++      expect(find.byIcon(Icons.crop), findsNothing);
++      expect(find.text('裁剪'), findsNothing);
++      // 单品/照片/文字/背景/更多
++      expect(find.text('更多'), findsOneWidget);
++    });
++
++    testWidgets('选中照片：多出「裁剪」', (tester) async {
++      await open(tester, [_photo()]);
++      await tapElement(tester, Image);
++      expect(find.byIcon(Icons.crop), findsOneWidget);
++      expect(find.text('裁剪'), findsOneWidget);
++      // 原有工具都还在
++      expect(find.text('单品'), findsOneWidget);
++      expect(find.text('照片'), findsOneWidget);
++      expect(find.text('文字'), findsOneWidget);
++      expect(find.text('背景'), findsOneWidget);
++      expect(find.text('更多'), findsOneWidget);
++    });
++
++    testWidgets('选中单品：没有「裁剪」', (tester) async {
++      await open(tester, [_clothes()]);
++      await tapElement(tester, Image);
++      expect(find.byIcon(Icons.crop), findsNothing);
++      expect(find.text('裁剪'), findsNothing);
++    });
++
++    testWidgets('选中文字：没有「裁剪」', (tester) async {
++      await open(tester, [_text()]);
++      await tapElement(tester, Text);
++      expect(find.byIcon(Icons.crop), findsNothing);
++      expect(find.text('裁剪'), findsNothing);
++    });
++
++    testWidgets('选中照片→再点空白取消选中：「裁剪」消失', (tester) async {
++      await open(tester, [_photo()]);
++      await tapElement(tester, Image);
++      expect(find.text('裁剪'), findsOneWidget);
++      // 画布最外层 GestureDetector（child 是 RepaintBoundary）的 onTap 会清掉选中；
++      // 点它左上角，避开居中偏下的照片元素。
++      final canvas = find.byWidgetPredicate((w) => w is GestureDetector && w.onTap != null && w.child is RepaintBoundary);
++      expect(canvas, findsOneWidget);
++      final r = tester.getRect(canvas);
++      await tester.tapAt(r.topLeft + const Offset(8, 8));
++      await tester.pumpAndSettle();
++      expect(find.text('裁剪'), findsNothing);
++    });
++  });
++
++  group('裁剪入口', () {
++    late Directory root;
++
++    setUp(() async {
++      root = await Directory.systemTemp.createTemp('t216_crop_entry');
++      ImageStore.root = root.path;
++      File('${root.path}/img_cropped.jpg').writeAsBytesSync(_onePixelPng);
++      File('${root.path}/orig_a.jpg').writeAsBytesSync(_onePixelPng);
++    });
++
++    tearDown(() async {
++      if (await root.exists()) await root.delete(recursive: true);
++    });
++
++    Future<void> open(WidgetTester tester, List<Map<String, dynamic>> els) async {
++      await tester.pumpWidget(MaterialApp(home: CollagePage(canvasJson: _canvas(els))));
++      await tester.pumpAndSettle();
++    }
++
++    testWidgets('cropOnly 的编辑页一进来就是裁剪模式（不用再点一次裁剪）', (tester) async {
++      final sample = File('${root.path}/sample.png')
++        ..writeAsBytesSync(img.encodePng(img.Image(width: 120, height: 120)..clear(img.ColorRgb8(240, 240, 240))));
++      await tester.pumpWidget(MaterialApp(home: ImageEditPage(path: sample.path, cropOnly: true)));
++      for (var i = 0; i < 100 && find.byType(Image).evaluate().isEmpty; i++) {
++        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
++        await tester.pump();
++      }
++      expect(find.byType(Image), findsWidgets);
++      // 裁剪框白边框直接出现，说明已经是裁剪模式；底部是「取消/全图/完成裁剪」，没有「下一步」
++      final border = find.byWidgetPredicate((w) =>
++          w is Container &&
++          w.decoration is BoxDecoration &&
++          (w.decoration as BoxDecoration).border is Border &&
++          ((w.decoration as BoxDecoration).border as Border).top.color == Colors.white);
++      expect(border, findsOneWidget);
++      expect(find.text('下一步'), findsNothing);
++      expect(find.text('全图'), findsOneWidget);
++    });
++
++    testWidgets('点「裁剪」进裁剪页，原图传的是 original 而不是裁过的图', (tester) async {
++      await open(tester, [_photo(original: 'orig_a.jpg')]);
++      await tester.tap(find.byType(Image));
++      await tester.pumpAndSettle();
++      expect(find.text('裁剪'), findsOneWidget);
++
++      await tester.tap(find.text('裁剪'));
++      // 只推一帧：图片解码在 isolate 里，等它反而会一直转圈
++      await tester.pump();
++      await tester.pump(const Duration(milliseconds: 50));
++
++      final page = tester.widget<ImageEditPage>(find.byType(ImageEditPage));
++      expect(page.cropOnly, isTrue, reason: '拼图裁剪要直接进裁剪模式');
++      expect(page.path, ImageStore.abs('orig_a.jpg'), reason: '再次裁剪要回到完整原图');
++    });
++  });
++}
++
++/// 1x1 透明 PNG，Image.file 能正常解码，避免 errorBuilder 干扰点击。
++final _onePixelPng = base64Decode(
++    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
