@@ -49,13 +49,13 @@
 详细进度日志：`source/wardrobe-android/docs/REWRITE_PROGRESS.md`。
 
 ## 5. 进行中 / 未完成
-### 5.1 批量导入 bug（代码已改，未 analyze、未测试、未打包）
+### 5.1 批量导入 bug（已随 2.1.4 发出，待真机验证）
 - 用户朋友反馈：批量导入 10 张，处理中途删除一张（识别错了），剩下的全停了。
 - 根因：`lib/pages/batch_add_page.dart` 的 `_process()` 用 `for (final it in items)` 遍历，中途 `items.remove` → `ConcurrentModificationError`，循环静默中断；剩余卡「等待处理」，保存按钮因 `done < items.length` 一直禁用，处理好的也存不了。只改品类/季节不会触发。
 - 另一问题：处理中途按返回，未完成的图直接丢且无提示。
 - 已改（当前源码里就是改后版本）：`while (!stopped)` 每次找下一张 state=='wait' 的项处理；`PopScope` + `_onBack()` 退出前 confirm 弹窗；保存后 `_saved=true`。
 - 改前原文件：`work/batch_add_page.2.1.3.bak`（diff 可看改动）。
-- **待办**：`flutter analyze` → 写/跑测试（含处理中删图、中途返回）→ 把结果给用户看 → 用户同意后版本改 2.1.4+7 打包。用户 11-04 晚说暂停，还没说继续。
+- **状态**：已随 2.1.4+7 发出（analyze 无新增问题）；还没在真机上试过「处理中删一张」「中途返回」，待用户真机验证。
 
 ### 5.2 淘宝扫描真机验证
 - 用户给的真实链接 `https://e.tb.cn/h.jUUOWu0?tk=o1NwTzovZQZ`（商品 ID 1048161815972）在海外网络被淘宝重定向到登录/反爬页，沙箱里没验证到；只在可访问页面和本地仿新版页上测通（`work/scantest/RESULTS.md`）。已请用户手机实测，尚无反馈。
